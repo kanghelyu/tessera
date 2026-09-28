@@ -1,0 +1,373 @@
+/* Read-only card window. No theming controls: the palette follows the system. */
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #f1f3f6;
+  --line: #dfe3e8;
+  --text: #14181f;
+  --muted: #5c6673;
+  --accent: #2563eb;
+  --focus: #f59e0b;
+  --up: #2563eb;
+  --down: #16a34a;
+  --cross: #8b5cf6;
+  --radius: 12px;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 24px rgba(16, 24, 40, .05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --panel: #171b21;
+    --panel-2: #1e232b;
+    --line: #2b323c;
+    --text: #e8ecf1;
+    --muted: #9aa5b4;
+    --accent: #60a5fa;
+    --focus: #fbbf24;
+    --up: #60a5fa;
+    --down: #4ade80;
+    --cross: #a78bfa;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px rgba(0, 0, 0, .35);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.6 -apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- header ---------- */
+.top {
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 12px 20px; border-bottom: 1px solid var(--line);
+  background: var(--panel); position: sticky; top: 0; z-index: 5;
+}
+.brand { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+.brand .mark { color: var(--focus); font-size: 17px; }
+.brand .name { font-weight: 650; letter-spacing: .2px; }
+.brand .ver { color: var(--muted); font-size: 12px; }
+/* the language switch: the interface is English unless this is pressed */
+.lang {
+  font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  white-space: nowrap;
+}
+.lang:hover { background: var(--panel-2); color: var(--text); }
+.search { flex: 1; display: flex; align-items: center; gap: 12px; }
+.search input {
+  flex: 1; min-width: 0; padding: 9px 13px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel-2); color: var(--text); font-size: 14px;
+  outline: none; transition: border-color .16s, box-shadow .16s;
+}
+.search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.hint, .meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+/* ---------- layout ---------- */
+.layout { display: grid; grid-template-columns: 316px minmax(0, 1fr); height: calc(100% - 57px); }
+.side {
+  border-right: 1px solid var(--line); background: var(--panel);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.side-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 11px 16px; border-bottom: 1px solid var(--line);
+  color: var(--muted); font-size: 12px; letter-spacing: .02em;
+}
+.side-head .count { font-variant-numeric: tabular-nums; }
+.cards { list-style: none; margin: 0; padding: 8px; overflow-y: auto; flex: 1; outline: none; }
+.main { overflow-y: auto; padding: 22px 26px 60px; min-width: 0; }
+
+/* ---------- card rows (focus animation lives here) ---------- */
+.row {
+  position: relative; padding: 10px 12px 10px 16px; border-radius: 10px;
+  cursor: pointer; margin-bottom: 4px; border: 1px solid transparent;
+  transition: background .18s ease, transform .18s ease, border-color .18s ease;
+}
+.row::before {
+  content: ""; position: absolute; left: 6px; top: 50%; width: 3px; height: 0;
+  border-radius: 3px; background: var(--focus); transform: translateY(-50%);
+  transition: height .22s cubic-bezier(.22, .8, .28, 1), opacity .22s ease; opacity: 0;
+}
+.row:hover { background: var(--panel-2); }
+.row.focus { background: color-mix(in srgb, var(--focus) 13%, transparent); transform: translateX(4px); }
+.row.focus::before { height: 62%; opacity: 1; }
+.row.active { border-color: var(--line); background: var(--panel-2); }
+.row .r-top { display: flex; gap: 8px; align-items: baseline; }
+.row .r-label { font-weight: 620; font-size: 13px; }
+.row .r-kind { color: var(--muted); font-size: 11px; }
+.row .r-snip {
+  color: var(--muted); font-size: 12px; margin-top: 3px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.row .r-paper {
+  color: var(--muted); font-size: 11px; margin-top: 4px; opacity: .8;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.row.pulse { animation: pulse .5s ease; }
+@keyframes pulse {
+  0% { background: color-mix(in srgb, var(--focus) 30%, transparent); }
+  100% { background: color-mix(in srgb, var(--focus) 13%, transparent); }
+}
+
+/* A click in the relations block moves the left column, and the reader then has to find the
+   row it moved to. **Three flashes, not one**: a single half-second fade is over before the
+   eye has travelled, and the first flash is what says "here" while the second and third
+   confirm it. It applies to a paper's row as well as a card's -- `.row.pulse` above only ever
+   matched a card row, so the paper highlight that `openSource` claimed to do was invisible. */
+.flash { animation: flash .42s ease-in-out 3; }
+@keyframes flash {
+  0%, 100% { background-color: transparent; }
+  50% { background-color: color-mix(in srgb, var(--focus) 34%, transparent); }
+}
+
+/* ---------- detail pane ---------- */
+.empty { max-width: 560px; margin: 12vh auto; text-align: center; color: var(--muted); }
+.empty h2 { color: var(--text); font-size: 18px; font-weight: 600; }
+/* Who the card came from. Smaller than the card's own label: the reader is reading the
+   statement, and the paper is its provenance, not its title. */
+.paper-head { margin-bottom: 14px; }
+.paper-title { font-size: 13.5px; font-weight: 600; line-height: 1.5; }
+.paper-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.card-label { font-size: 20px; font-weight: 660; letter-spacing: .2px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  font-size: 11px; padding: 2px 8px; border-radius: 20px; color: var(--muted);
+  border: 1px solid var(--line); background: var(--panel-2);
+}
+.block { margin-top: 20px; }
+.block-title {
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 7px;
+}
+/* A block that can be put away carries the control in its own title row, so it never
+   disappears without a way back. */
+.block-title.with-fold { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fold {
+  font: inherit; font-size: 13px; line-height: 1; padding: 2px 6px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  color: var(--muted);
+}
+.fold:hover { background: var(--panel-2); color: var(--text); }
+.statement {
+  margin: 0; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  white-space: pre-wrap; word-break: break-word;
+  font: 14.5px/1.85 -apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+}
+.abstract {
+  padding: 15px 18px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); color: var(--text); box-shadow: var(--shadow);
+  max-height: 260px; overflow-y: auto;
+}
+.source { color: var(--muted); font-size: 12.5px; }
+.source a { color: var(--accent); text-decoration: none; }
+.actions { display: flex; align-items: center; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
+button.go {
+  font: inherit; font-size: 13px; padding: 8px 15px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff;
+  transition: filter .16s, transform .16s;
+}
+button.go:hover { filter: brightness(1.08); }
+button.go:active { transform: translateY(1px); }
+button.go.ghost { background: transparent; color: var(--accent); }
+button.go:disabled { opacity: .55; cursor: default; }
+.note { color: var(--muted); font-size: 12px; }
+
+/* ---------- related ---------- */
+.related { margin-top: 18px; }
+.rel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap; margin-bottom: 10px;
+}
+.rel-head .block-title { margin-bottom: 0; }
+.rel-controls { display: flex; gap: 8px; }
+.chip {
+  font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.chip:hover { background: var(--panel-2); }
+.chip.up.on { background: rgba(37, 99, 235, .12); border-color: var(--up); color: var(--up); }
+.chip.down.on {
+  background: rgba(22, 163, 74, .12); border-color: var(--down); color: var(--down);
+}
+/* the related articles on the left, the dependencies beside them when asked for, the graph
+   taking the rest */
+.rel-row { display: flex; gap: 12px; align-items: stretch; }
+.rel-side {
+  flex: 0 0 232px; max-height: 560px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+  padding: 12px;
+}
+.rel-side[hidden] { display: none; }
+/* the dependency column is asked for, so it reads as an aside rather than as furniture */
+.rel-side.deps { background: var(--panel-2); }
+.rel-title {
+  font-size: 12px; font-weight: 620; margin-bottom: 6px; display: flex; gap: 6px;
+}
+.rel-title span { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.rel-title.up { color: var(--up); }
+.rel-title.down { color: var(--down); }
+.rel-title.cross { color: var(--cross); }
+/* Each list scrolls on its own. Without this the first list -- the related papers, whose
+   titles are long -- pushed the two dependency lists below the fold of the column, and the
+   reader reported exactly that: the upstream and downstream lists "都是空的". They were not
+   empty, they were out of sight. */
+.rel-list {
+  list-style: none; margin: 0; padding: 0; font-size: 12.5px;
+  max-height: 148px; overflow-y: auto;
+}
+.rel-list li {
+  padding: 6px 7px; border-radius: 7px; cursor: pointer; line-height: 1.5;
+}
+.rel-list li:hover { background: var(--panel-2); }
+.rel-list li .m { color: var(--muted); font-size: 11px; }
+.rel-list .none { color: var(--muted); cursor: default; }
+.rel-list .none:hover { background: transparent; }
+
+/* ---------- the graph: this box is the canvas ---------- */
+.graph {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); height: 560px; overflow: hidden; cursor: grab;
+  touch-action: none;
+}
+.graph:active { cursor: grabbing; }
+.graph svg { display: block; }
+.graph .gn { cursor: pointer; }
+.graph text { font: 11px ui-monospace, Menlo, monospace; }
+/* The highlight is on from the start: the focus card's dependencies stay lit and the rest
+   recedes. Clicking a node moves the highlight onto it. */
+.graph svg.has-sel .gn.off { opacity: 0.32; }
+.graph svg.has-sel .ge.off { opacity: 0.12; }
+.graph svg.has-sel .gn.on rect { stroke-width: 2.6; }
+.graph svg.has-sel .ge.on { stroke-opacity: 1; }
+.graph-note { color: var(--muted); font-size: 12px; padding: 8px 4px 2px; line-height: 1.7; }
+.graph-note b { color: var(--text); font-weight: 600; }
+
+/* ---------- the node detail, beside the graph ---------- */
+/* ---------- the node detail: a box that pops up over the graph ---------- */
+/* It overlays rather than taking a column, because a column starves the graph -- four
+   columns across a window left the canvas 280px wide, which is not a graph. */
+.graph-row { position: relative; flex: 1 1 auto; min-width: 0; display: flex; }
+.graph-row .graph { flex: 1 1 auto; min-width: 0; }
+
+/* Three dots, in the area being computed, for as long as the computation takes. The card's own
+   text is already on screen -- this says "the graph is coming", not "the window is busy". */
+.loading {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  gap: 7px; pointer-events: none; background: color-mix(in srgb, var(--panel) 70%, transparent);
+  border-radius: var(--radius);
+}
+.loading[hidden] { display: none; }
+.loading span {
+  width: 9px; height: 9px; border-radius: 50%; background: var(--muted);
+  animation: dot 1.1s ease-in-out infinite;
+}
+.loading span:nth-child(2) { animation-delay: .16s; }
+.loading span:nth-child(3) { animation-delay: .32s; }
+@keyframes dot {
+  0%, 80%, 100% { opacity: .25; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-4px); }
+}
+/* the canvas dims a little while it is being computed, so the dots read as "not yet" */
+.graph.busy { opacity: .35; }
+.node-detail {
+  position: absolute; top: 10px; right: 10px; bottom: 10px; width: 330px;
+  overflow: auto; padding: 14px 16px; z-index: 2;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+  box-shadow: 0 6px 22px rgba(16, 24, 40, .14);
+  font-size: 12.5px; line-height: 1.7;
+}
+.node-detail[hidden] { display: none; }
+/* The panel is absolutely positioned, so this sits in its own top-right corner without a
+   wrapper. Padding on the right keeps a long title from running under it. */
+.node-detail .fold { position: absolute; top: 8px; right: 10px; }
+.node-detail h3 { font-size: 13px; margin: 0 26px 6px 0; line-height: 1.5; }
+.node-detail .d-meta { color: var(--muted); font-size: 11.5px; margin-bottom: 8px; }
+.node-detail .d-body { margin: 8px 0; }
+.node-detail a {
+  display: block; color: var(--accent); font-size: 12px; margin-top: 6px;
+  word-break: break-all;
+}
+.node-detail button.go { margin-top: 12px; }
+
+/* ---------- search filters ---------- */
+/* A search box is half of a search interface; the other half is what the collection says it
+   contains, and what the reader may narrow it by. */
+.filters {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  flex-basis: 100%; margin: 0;
+}
+.filters select, .filters input {
+  font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  max-width: 170px;
+}
+.filters input { width: 120px; }
+.filters .chip { padding: 4px 10px; }
+/* the matched words in a result's prose: the reason this card came back */
+mark { background: color-mix(in srgb, var(--focus) 32%, transparent); color: inherit;
+       border-radius: 3px; padding: 0 1px; }
+.r-matched { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* ---------- the sidebar tree: a paper, and its conclusions under it ---------- */
+.cards > li.paper { border-bottom: 1px solid var(--line); }
+.p-top {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 9px 12px; cursor: pointer;
+}
+.p-top:hover { background: var(--panel-2); }
+.p-title { font-size: 12.5px; line-height: 1.45; }
+.p-meta {
+  color: var(--muted); font-size: 11px; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.paper .p-cards { display: none; }
+.paper.open .p-cards { display: block; }
+.paper .p-cards .row { padding-left: 22px; }
+
+/* ---------- compiled math ---------- */
+.statement .katex, .abstract .katex { font-size: 1.03em; }
+.statement .katex-display, .abstract .katex-display {
+  margin: 10px 0; padding: 2px 0; overflow-x: auto; overflow-y: hidden;
+}
+.statement .katex-error, .abstract .katex-error {
+  color: var(--warn, #b45309); background: color-mix(in srgb, #f59e0b 12%, transparent);
+  border-radius: 4px; padding: 0 3px;
+}
+.tex-status { margin-top: 7px; font-size: 11.5px; color: var(--muted); }
+.tex-status.warn { color: #b45309; }
+.cardref {
+  color: var(--accent); text-decoration: none; border-bottom: 1px dotted currentColor;
+  cursor: pointer; font-weight: 600;
+}
+.cardref:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.cardref.unresolved { color: var(--muted); border-bottom-style: dashed; font-weight: 400; }
+kbd {
+  font: 11px ui-monospace, Menlo, monospace; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px;
+}
+@media (prefers-color-scheme: dark) {
+  .tex-status.warn { color: #fbbf24; }
+  .statement .katex-error, .abstract .katex-error { color: #fbbf24; background: rgba(251, 191, 36, .12); }
+}
+
+/* ---------- narrow windows: the columns stack ---------- */
+@media (max-width: 1080px) {
+  .rel-row { flex-wrap: wrap; }
+  .rel-side { flex: 1 1 46%; max-height: 240px; }
+  .graph-row { flex: 1 1 100%; }
+}
+
+/* a tab that is running the previous app.js says so instead of lying */
+.stale {
+  background: #b45309; color: #fff; font-size: 12.5px; padding: 7px 14px; text-align: center;
+}
+.stale[hidden] { display: none; }

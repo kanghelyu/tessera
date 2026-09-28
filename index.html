@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<!-- English is the interface language; Chinese is a manual switch in the header. Every string
+     the window shows is looked up in `ui/app.js` (`T`), so there is one place to change and
+     one place to check. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera cards</title>
+<!-- KaTeX is vendored in this repository (ui/vendor/katex, MIT): the card window
+     renders mathematics offline and needs nothing else installed. -->
+<link rel="stylesheet" href="./vendor/katex/katex.min.css">
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="mark">◎</span>
+    <span class="name" data-i18n="brand">Tessera cards</span>
+    <span class="ver" id="ver">—</span>
+  </div>
+  <form class="search" id="search-form" autocomplete="off">
+    <input id="q" type="search" placeholder="Search a paper, a theorem, a concept"
+           aria-label="Search cards">
+    <span class="hint" id="hint" data-i18n="search.hint">↑ ↓ focus · ↵ open</span>
+  </form>
+  <div class="filters" id="filters">
+    <select id="f-cluster" aria-label="Field">
+      <option value="" data-i18n="filter.anyfield">Any field</option>
+    </select>
+    <select id="f-kind" aria-label="Kind">
+      <option value="" data-i18n="filter.anykind">Any kind</option>
+    </select>
+    <input id="f-author" type="search" data-i18n-ph="filter.author"
+           placeholder="author" aria-label="Author">
+    <input id="f-year" type="search" data-i18n-ph="filter.year"
+           placeholder="year or 2015-2018" aria-label="Year">
+    <select id="f-sort" aria-label="Sort">
+      <option value="relevance" data-i18n="sort.relevance">Relevance</option>
+      <option value="newest" data-i18n="sort.newest">Newest first</option>
+      <option value="oldest" data-i18n="sort.oldest">Oldest first</option>
+    </select>
+    <button class="chip" id="f-clear" type="button" data-i18n="filter.clear">Clear</button>
+  </div>
+  <div class="meta" id="meta" data-i18n="meta.loading">loading…</div>
+  <button class="lang" id="lang" title="Switch language">中文</button>
+</header>
+<!-- A tab running the previous app.js looks exactly like a bug in the current one. The server
+     stamps its own files into /api/stats; when the stamp moves, this says so. -->
+<div class="stale" id="stale" hidden></div>
+
+<div class="layout">
+  <aside class="side">
+    <div class="side-head">
+      <span data-i18n="side.papers">Papers</span>
+      <span class="count" id="count">0</span>
+    </div>
+    <ul class="cards" id="cards" tabindex="0" aria-label="Papers"></ul>
+  </aside>
+
+  <main class="main" id="main">
+    <section class="empty" id="empty">
+      <h2 data-i18n="empty.title">Type a keyword or a paper title</h2>
+      <p data-i18n="empty.body">A paper the library does not hold is fetched, washed into cards
+        and stored, and its related cards come back below.</p>
+    </section>
+
+    <section class="pane" id="pane" hidden>
+      <!-- Who wrote it, so a card is never an orphan statement. -->
+      <div class="paper-head">
+        <div class="paper-title" id="paper-title"></div>
+        <div class="paper-meta" id="paper-meta"></div>
+      </div>
+
+      <div class="card-head">
+        <div class="card-label" id="card-label"></div>
+        <div class="chips" id="card-chips"></div>
+      </div>
+
+      <div class="block">
+        <div class="block-title" data-i18n="block.statement">Statement</div>
+        <div class="statement" id="statement"></div>
+        <div class="tex-status" id="tex-status"></div>
+      </div>
+
+      <div class="block">
+        <div class="block-title with-fold">
+          <span data-i18n="block.abstract">Abstract (read-only)</span>
+          <button class="fold" id="abstract-fold" type="button">×</button>
+        </div>
+        <div class="abstract" id="abstract"></div>
+      </div>
+
+      <div class="block">
+        <div class="block-title" data-i18n="block.source">Source</div>
+        <div class="source" id="source"></div>
+      </div>
+
+      <div class="actions">
+        <span class="note" id="related-note"></span>
+      </div>
+
+      <!-- The relation block is part of the card page: it opens with the card, no button. The
+           graph is the headline, the columns beside it are its index, and upstream/downstream
+           sit behind two mutually exclusive buttons -- they are the same question asked in two
+           directions, and showing both at once makes the reader work out which is which. -->
+      <div class="related" id="related">
+        <div class="rel-head">
+          <div class="block-title" data-i18n="rel.title">Graph</div>
+          <div class="rel-controls">
+            <button class="chip up" id="show-up"><span data-i18n="rel.up">Upstream</span>
+              <span id="up-count">0</span></button>
+            <button class="chip down" id="show-down"><span data-i18n="rel.down">Downstream</span>
+              <span id="down-count">0</span></button>
+          </div>
+        </div>
+        <div class="rel-row">
+          <aside class="rel-side" id="rel-cross">
+            <div class="rel-title cross"><span data-i18n="rel.cross">Related papers</span>
+              <span class="count" id="cross-count">0</span></div>
+            <ul class="rel-list" id="cross-list"></ul>
+          </aside>
+          <aside class="rel-side deps" id="rel-deps" hidden>
+            <div class="rel-title" id="deps-title">Upstream · what it depends on</div>
+            <ul class="rel-list" id="deps-list"></ul>
+          </aside>
+          <div class="graph-row">
+            <div class="graph" id="graph"></div>
+            <!-- Three dots, in the area that is being computed, for as long as it takes. -->
+            <div class="loading" id="rel-loading" hidden>
+              <span></span><span></span><span></span>
+            </div>
+            <aside class="node-detail" id="node-detail" hidden></aside>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="./vendor/katex/katex.min.js"></script>
+<script src="./texrender.js"></script>
+<script src="./offline.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
