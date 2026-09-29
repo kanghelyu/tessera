@@ -328,7 +328,9 @@
     $("count").textContent = String(entries.length);
     entries.forEach((entry) => {
       const item = document.createElement("li");
-      item.className = "paper" + (entry.cards ? " open" : "");
+      // Open when its matching cards came back with the answer; the rest are fetched on click.
+      // `entry.cards` is `[]` -- not undefined -- for a paper the answer listed without rows.
+      item.className = "paper" + (entry.cards && entry.cards.length ? " open" : "");
       item.dataset.source = entry.paper.source_id;
       const top = document.createElement("div");
       top.className = "p-top";
@@ -366,7 +368,11 @@
       refreshRows();
       return;
     }
-    if (!entry.cards) {
+    // **An empty list is not a loaded list.** A paper can now appear in the panel with no rows
+    // behind it -- the panel lists every paper the filter selected, and only `k` cards come back
+    // -- so `entry.cards` is `[]` for most of them, and `[]` is *truthy*: the fetch was skipped
+    // and the row expanded to nothing at all. Andy: "怎么打不开这些文章的卡片".
+    if (!entry.cards || !entry.cards.length) {
       const detail = await api("/api/paper?source_id=" +
                                encodeURIComponent(entry.paper.source_id));
       entry.cards = detail.cards || [];
