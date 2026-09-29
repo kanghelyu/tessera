@@ -6,12 +6,17 @@ its dependencies and its related papers drawn as a graph.
 
 The site is static: no server, no API, no build step at runtime. Open `index.html`.
 
-* **Search** — relevance ranking (coverage, spelling, proximity, then BM25), with
-  `author:`, `year:`, `cluster:`, `kind:`, `paper:` filters, and a sort by publication date.
+* **Search** — relevance ranking (coverage, word form, spelling, proximity, then BM25), with
+  `author:`, `year:`, `cluster:`, `kind:`, `paper:` filters, a sort by publication date, and a
+  shareable link: a query writes itself into the address (`#q=…&author=…`). A plural
+  (`coideals`), a misspelling (`grassmanian`) and a missing space (`coidealsubalgebra`) are all
+  answered — each one confirmed by the index and said out loud ("searched as: …").
 * **A card** — its statement rendered with the paper's own macros, its abstract, the paper it
-  came from, and a link to the source.
+  came from, and a link to the source. A formula that cannot compile is shown as-is and
+  counted, never dropped.
 * **The graph** — the focus card, what it depends on, what depends on it, its similar
-  neighbours inside the paper, and the related papers elsewhere in the library.
+  neighbours inside the paper, and the related papers elsewhere in the library. Drag to pan,
+  wheel or pinch to zoom (anchored where you point), click a node for its abstract.
 
 ## Provenance
 

@@ -132,9 +132,52 @@
       if (!buckets[key]) buckets[key] = [];
       buckets[key].push(entry[0]);
     });
+    // How big each paper is -- one pass here rather than one per search, because the side
+    // panel prints it for every paper in the answer.
+    var sizes = Object.create(null);
+    data.docs.forEach(function (doc) {
+      sizes[doc.source_id] = (sizes[doc.source_id] || 0) + 1;
+    });
 
     function frequency(term) {
       return byTerm[term] ? byTerm[term].rows.length : 0;
+    }
+
+    /** The singular forms the index actually holds for a plural query term.
+     *
+     * A plural is not a typo: `spinors` reaches `spinor` at an edit cost of one, so every
+     * plural hit paid the `typo` penalty and sorted behind exact matches, while
+     * `classes`→`class` is **two** edits and found nothing at all. Folding the suffix
+     * answers both at cost zero. Only folds the index confirms (`df` above the rare bar),
+     * and skips `-ss`/`-us`/`-is` because `genus`, `basis` and `series` are singulars
+     * already. Mirrors `Index.singulars` on the server.
+     */
+    function singulars(term) {
+      if (term.length < 4) return [];
+      var out = [];
+      if (/ies$/.test(term) && term.length >= 6) out.push(term.slice(0, -3) + "y");
+      if (/es$/.test(term) && term.length >= 6) out.push(term.slice(0, -2));
+      if (/s$/.test(term) && !/(ss|us|is)$/.test(term)) out.push(term.slice(0, -1));
+      return out.filter(function (form) {
+        return form !== term && frequency(form) > RARE;
+      });
+    }
+
+    /** The two words a missing space would have written, when both halves are real words.
+     *
+     * Edit distance cannot fix `coidealsubalgebra`: the answer is two terms, not one. A split
+     * is offered only when the index holds *both* halves above the rare bar, so accidental
+     * fragments never reach the answer. Mirrors `Index.splits` on the server.
+     */
+    function splits(term) {
+      if (term.length < 8) return [];
+      var out = [];
+      for (var cut = 3; cut <= term.length - 3; cut += 1) {
+        var left = term.slice(0, cut), right = term.slice(cut);
+        if (STOPWORDS.has(left) || STOPWORDS.has(right)) continue;
+        if (frequency(left) > RARE && frequency(right) > RARE) out.push(left + " " + right);
+      }
+      return out.slice(0, 2);
     }
 
     function nearTerms(term) {
@@ -180,22 +223,47 @@
         if (STOPWORDS.has(term)) { expanded.push(term); return; }
         var count = frequency(term);
         if (count > RARE) { expanded.push(term); return; }
-        var found = nearTerms(term);
-        var chosen = [];
         if (!count) {
-          if (found.length) chosen = [found[0][1]];
-        } else {
-          var floor = Math.max(2, count * RATIO);
-          chosen = found.filter(function (pair) { return frequency(pair[1]) >= floor; })
-            .slice(0, 1).map(function (pair) { return pair[1]; });
+          // **Word form first, then misspelling, then a missing space** -- the order the
+          // server expands in (`Index.expand_terms`), because the cross-implementation test
+          // compares the two engines query by query. Each step is confirmed by the index
+          // before it is offered, and each is reported in `corrections`: a search that
+          // quietly answers a different question is worse than one that answers nothing.
+          var folded = singulars(term);
+          if (folded.length) {
+            var best = folded[0];
+            folded.forEach(function (form) {
+              if (frequency(form) > frequency(best) ||
+                  (frequency(form) === frequency(best) && form > best)) best = form;
+            });
+            corrections[term] = [best];
+            expanded.push(best);
+            return;
+          }
+          var found = nearTerms(term);
+          if (found.length) {
+            corrections[term] = [found[0][1]];
+            expanded.push(found[0][1]);
+            return;
+          }
+          var split = splits(term);
+          if (split.length) {
+            corrections[term] = [split[0]];
+            split[0].split(" ").forEach(function (part) { expanded.push(part); });
+            return;
+          }
+          unmatched.push(term);
+          return;
         }
+        var floor = Math.max(2, count * RATIO);
+        var chosen = nearTerms(term).filter(function (pair) {
+            return frequency(pair[1]) >= floor;
+          }).slice(0, 1).map(function (pair) { return pair[1]; });
         if (chosen.length) {
           corrections[term] = chosen;
           chosen.forEach(function (name) { expanded.push(name); });
-        } else if (count) {
-          expanded.push(term);
         } else {
-          unmatched.push(term);
+          expanded.push(term);             // rare but real: keep it
         }
       });
       return { terms: expanded, corrections: corrections, unmatched: unmatched };
@@ -305,7 +373,7 @@
     }
 
     return { expand: expand, scores: scores, window: window, passes: passes,
-             frequency: frequency };
+             frequency: frequency, data: data, sizes: sizes, meta: meta };
   }
 
   /** An author string's words, periods stripped: `V. M. Futorny` -> `['v', 'm', 'futorny']`.
@@ -474,6 +542,24 @@
     return cache[name];
   }
 
+  /** The search engine, built once.
+   *
+   * The data files never change while the page is open, but the term map, the length
+   * buckets and the paper sizes were rebuilt for **every search** -- one walk over 158k
+   * postings per query, on the reader's phone. The engine is a pure function of the three
+   * files, so it is built the first time a query arrives and reused after that.
+   */
+  var enginePromise = null;
+  function getEngine() {
+    if (!enginePromise) {
+      enginePromise = Promise.all([load("search.json"), load("meta.json"),
+                                   load("authors.json")]).then(function (all) {
+        return searcher(all[0], all[1], all[2]);
+      });
+    }
+    return enginePromise;
+  }
+
   function json(payload, status) {
     return new Response(JSON.stringify(payload), {
       status: status || 200, headers: { "Content-Type": "application/json" } });
@@ -509,14 +595,12 @@
     });
     wanted = cleaned;
     var started = Date.now();
-    var data = await load("search.json");
+    var engine = await getEngine();
+    var data = engine.data;
     // The filter row asks about authors, which the tree index does not carry -- `meta.json` is
-    // `Engine.papers_meta`, the same map the server filters on.
-    var meta = await load("meta.json");
-    // ...and `authors.json` is `Engine.author_index`: the people, and how arXiv spells them. The
-    // author filter names a person, so the browser needs the same table the server has.
-    var authors = await load("authors.json");
-    var engine = searcher(data, meta, authors);
+    // `Engine.papers_meta`, the same map the server filters on. The engine holds it, because
+    // the author filter resolves a *person*, and that table is what makes the resolution.
+    var meta = engine.meta;
     var raw = tokenizeQuery(parsed.text);
     var plan = engine.expand(raw);
     var significant = plan.terms.filter(function (term) { return !STOPWORDS.has(term); });
@@ -579,8 +663,6 @@
     // **The paper list the side panel navigates by**, computed from every matching row rather
     // than from the rows that fit in `limit` -- see `Engine.search`. Grouping the *returned* rows
     // made the panel say "Papers 3" for a filter that matched 142 papers.
-    var sizes = Object.create(null);
-    data.docs.forEach(function (doc) { sizes[doc.source_id] = (sizes[doc.source_id] || 0) + 1; });
     var order = [], hits = Object.create(null);
     results.forEach(function (row) {
       if (!(row.source_id in hits)) { hits[row.source_id] = 0; order.push(row.source_id); }
@@ -590,10 +672,17 @@
       var info = meta[sourceId] || {};
       return { source_id: sourceId, title: info.title || sourceId, year: info.year || "",
                cluster: info.cluster || "", authors: info.authors || [],
-               cards: sizes[sourceId] || 0, hits: hits[sourceId] };
+               cards: engine.sizes[sourceId] || 0, hits: hits[sourceId] };
     });
     var shown = results.slice(0, limit);
-    var complete = shown.filter(function (row) { return row.matched_count === unique.length; });
+    // **The hit count is the answer's, not the page's.** It was computed from `shown`, the
+    // rows the window displays -- so a query whose every word is matched by 60 cards reported
+    // "8 hits". The rows are all in memory and the field is already on them. Mirrors
+    // `Engine.search`, which counts the whole result set; the cross-check test compares them.
+    var matchedAll = 0;
+    results.forEach(function (row) {
+      if (row.matched_count === unique.length) matchedAll += 1;
+    });
     var missing = plan.unmatched.filter(function (term) { return term.length >= MIN_TERM; });
     // Each row is written in its own paper's notation, so the tables travel with the rows.
     var macros = {}, overrides = {};
@@ -607,8 +696,8 @@
              results: shown,
              // Every row that passed a filter-with-no-query is a hit, and how many there are is
              // what the reader asked for; see `Engine.search`.
-             hit_count: filterOnly ? results.length : complete.length,
-             miss: Boolean(missing.length) || !complete.length, decisive_terms: unique,
+             hit_count: filterOnly ? results.length : matchedAll,
+             miss: Boolean(missing.length) || !matchedAll, decisive_terms: unique,
              corrected: plan.corrections, unmatched: plan.unmatched, filters: wanted,
              sort: sort, papers: papers, paper_count: papers.length,
              index_docs: data.docs.length, facets: null,

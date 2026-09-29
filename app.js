@@ -23,7 +23,7 @@
       "meta.indexed": "{n} cards indexed",
       "meta.ms": "{n} ms",
       "meta.miss": "nothing in the library",
-      "meta.corrected": "spelling: {list}",
+      "meta.corrected": "searched as: {list}",
       "meta.unmatched": "no card has: {list}",
       "meta.partial": "closest matches (no card has every word)",
       "filter.anyfield": "Any field",
@@ -108,7 +108,7 @@
       "meta.indexed": "{n} 张卡",
       "meta.ms": "{n} ms",
       "meta.miss": "库内未命中",
-      "meta.corrected": "已按拼写纠正：{list}",
+      "meta.corrected": "按词形匹配：{list}",
       "meta.unmatched": "库内没有这些词：{list}",
       "meta.partial": "最接近的结果（没有卡片包含全部词）",
       "filter.anyfield": "任意领域",
@@ -450,6 +450,25 @@
     });
   }
 
+  /** The address carries the question, so a search can be shared and revisited.
+   *
+   * `replaceState`, never `pushState`: arrowing through a paper is not navigation the
+   * reader wants to walk back through, and neither is each keystroke of a query. The card
+   * page keeps its own `#<card_id>` deep link; the two never fight, because a search over-
+   * writes whatever was there and opening a card overwrites the query.
+   */
+  function syncHash(text, filters) {
+    const params = new URLSearchParams();
+    const query = String(text || "").trim();
+    if (query) params.set("q", query);
+    Object.keys(filters).forEach((name) => params.set(name, filters[name]));
+    const next = params.toString() ? "#" + params.toString() : "#";
+    if (location.hash !== next) {
+      history.replaceState(null, "", params.toString() ? next : location.pathname +
+                                                            location.search);
+    }
+  }
+
   async function runSearch(text) {
     const filters = activeFilters();
     if (!text.trim() && !Object.keys(filters).length) return loadPapers();
@@ -485,6 +504,7 @@
       if (group) group.cards.push(row);
     });
     renderPapers(groups);
+    syncHash(text, filters);
     const parts = [t("meta.hits", { n: payload.hit_count }),
                    t("meta.indexed", { n: payload.index_docs }),
                    t("meta.ms", { n: payload.took_ms })];
@@ -665,6 +685,10 @@
   }
   wireRefs($("statement"));
   wireRefs($("abstract"));
+  // the node panel carries a card's statement, and the statement's cross references are
+  // links there too -- a reference that does nothing because it sits in the graph's side
+  // panel is a link the reader has already been taught to click.
+  wireRefs($("node-detail"));
 
   /* ---------------- related: the articles on the left, the graph on the right ----------------
    * The block is part of the card page, so it opens *with* the card -- there is no button to
@@ -715,10 +739,15 @@
     renderCross(payload);
     renderGraph(payload);
     const method = payload.method || {};
-    $("related-note").textContent = (payload.status === "cached" ? t("rel.cached") :
-      payload.status === "budget_exhausted" ? t("rel.budget") : t("rel.computed")) +
-      " · " + t("rel.method", { pool: method.candidate_pool || "-",
-                                keep: method.top_k || "-" });
+    // "cached" is a fact about the *server's* cache; on the published static site every
+    // relation was precomputed at build time, so saying where the payload came from would
+    // be noise the reader cannot act on.
+    const statusPart = window.TESSERA_STATIC ? "" :
+      (payload.status === "cached" ? t("rel.cached") :
+       payload.status === "budget_exhausted" ? t("rel.budget") : t("rel.computed")) + " · ";
+    $("related-note").textContent = statusPart +
+      t("rel.method", { pool: method.candidate_pool || "-",
+                        keep: method.top_k || "-" });
   }
 
   /** Three dots in the area being computed, for as long as it takes. */
@@ -1144,11 +1173,20 @@
     host.append(note);
   }
 
-  /** Drag to pan, wheel to zoom, click to move the highlight -- and nothing else.
+  /** Drag to pan, wheel to zoom, pinch to zoom, click to move the highlight -- and nothing
+   * else.
    *
    * The highlight is on from the start, on the focus card: its upstream and downstream are
    * emphasised and the rest of the graph recedes. Clicking a node moves it there, which is
-   * the whole interaction, and clicking a card opens it. */
+   * the whole interaction, and clicking a card opens it.
+   *
+   * The gestures are Pointer Events, so one code path covers the mouse, a pen and a finger:
+   * the graph previously answered only the mouse, which on a phone meant a picture that
+   * could be neither panned nor zoomed -- the `touch-action: none` was already in the
+   * stylesheet, saying the element wants the touches, and nothing was listening. Both zooms
+   * are **anchored**: a wheel zoom keeps the point under the cursor under it, and a pinch
+   * keeps the midpoint between the fingers -- zooming used to move the content toward the
+   * top-left corner, which reads as the graph sliding away. */
   function wireGraph(svg, view, focus) {
     const apply = () => {
       view.setAttribute("transform", "translate(" + GRAPH.tx + "," + GRAPH.ty + ") scale(" +
@@ -1176,11 +1214,55 @@
       });
     };
 
+    const pointers = new Map();
     let drag = null;
-    svg.addEventListener("mousedown", (event) => {
-      drag = { x: event.clientX, y: event.clientY, tx: GRAPH.tx, ty: GRAPH.ty, moved: false };
+    let pinch = null;
+
+    const markDragged = () => {
+      svg.dataset.dragged = "1";
+      setTimeout(() => { delete svg.dataset.dragged; }, 0);
+    };
+    /** Zoom to `next` while keeping the viewport point (`mx`, `my`) over the same content. */
+    const zoomAt = (next, mx, my) => {
+      const factor = next / GRAPH.scale;
+      GRAPH.tx = mx - (mx - GRAPH.tx) * factor;
+      GRAPH.ty = my - (my - GRAPH.ty) * factor;
+      GRAPH.scale = next;
+      apply();
+    };
+
+    svg.addEventListener("pointerdown", (event) => {
+      // Capture keeps the gesture alive when the pointer leaves the box. It throws when the
+      // pointer is already gone -- a race on real devices, always on a synthetic event -- and
+      // an exception here would kill the handler before the pointer is even registered, so
+      // the whole gesture silently dies. Losing capture only costs tracking past the edge.
+      try {
+        svg.setPointerCapture(event.pointerId);
+      } catch (_error) { /* the pointer vanished; the gesture still works inside the box */ }
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 1) {
+        drag = { x: event.clientX, y: event.clientY, tx: GRAPH.tx, ty: GRAPH.ty, moved: false };
+      } else if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, scale: GRAPH.scale,
+                  tx: GRAPH.tx, ty: GRAPH.ty, cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 };
+        drag = null;
+      }
     });
-    window.addEventListener("mousemove", (event) => {
+    svg.addEventListener("pointermove", (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 2 && pinch) {
+        const [a, b] = [...pointers.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        const rect = svg.getBoundingClientRect();
+        const next = Math.max(0.35, Math.min(2.6, pinch.scale * dist / pinch.dist));
+        const cx = (a.x + b.x) / 2 - rect.left, cy = (a.y + b.y) / 2 - rect.top;
+        zoomAt(next, cx, cy);
+        drag = null;
+        markDragged();
+        return;
+      }
       if (!drag) return;
       const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
       if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
@@ -1188,17 +1270,24 @@
       GRAPH.ty = drag.ty + dy;
       apply();
     });
-    window.addEventListener("mouseup", () => {
-      const moved = drag && drag.moved;
-      drag = null;
-      if (moved) svg.dataset.dragged = "1";
-      setTimeout(() => { delete svg.dataset.dragged; }, 0);
-    });
+    const release = (event) => {
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (!pointers.size) {
+        const moved = drag && drag.moved;
+        drag = null;
+        if (moved) markDragged();
+      }
+    };
+    svg.addEventListener("pointerup", release);
+    svg.addEventListener("pointercancel", release);
+
     svg.addEventListener("wheel", (event) => {
       event.preventDefault();
+      const rect = svg.getBoundingClientRect();
       const step = event.deltaY < 0 ? 1.12 : 1 / 1.12;
-      GRAPH.scale = Math.max(0.35, Math.min(2.6, GRAPH.scale * step));
-      apply();
+      const next = Math.max(0.35, Math.min(2.6, GRAPH.scale * step));
+      zoomAt(next, event.clientX - rect.left, event.clientY - rect.top);
     }, { passive: false });
 
     view.addEventListener("click", (event) => {
@@ -1360,6 +1449,10 @@
     if (event.key === "/" && document.activeElement !== $("q")) {
       event.preventDefault();
       $("q").focus();
+    } else if (event.key === "Escape" && !$("node-detail").hidden) {
+      // the box has a close button, but Escape is what "put this away" means everywhere
+      // else; a keyboard reader should not need the mouse for it.
+      $("node-detail").hidden = true;
     }
   });
   $("show-up").addEventListener("click", () => showDeps("up"));
@@ -1408,17 +1501,35 @@
     // `#<card_id>` and the older `#<card_id>/related` are the same thing now: the relation
     // block is part of the card page, so there is nothing extra to ask for.
     const parts = raw.split("/");
-    if (!/^ma-c-[A-Za-z0-9]+$/.test(parts[0])) return false;
-    openCard(parts[0]).catch(showError);
-    return true;
+    if (/^ma-c-[A-Za-z0-9]+$/.test(parts[0])) {
+      openCard(parts[0]).catch(showError);
+      return true;
+    }
+    // `#q=…&author=…` is a shareable search: the query and the filter row travel together,
+    // so opening the link answers with the same list rather than with the browse view.
+    if (/^q=/.test(raw)) {
+      const params = new URLSearchParams(raw);
+      $("q").value = params.get("q") || "";
+      ["f-cluster", "f-kind", "f-author", "f-year"].forEach((id) => {
+        const node = $(id);
+        if (node) node.value = params.get(id.slice(2)) || "";
+      });
+      runSearch($("q").value).catch(showError);
+      return true;
+    }
+    return false;
   }
 
   // English first: translate the static markup before anything is fetched, so the page is
   // never briefly half a language.
   applyLang();
   loadPapers().then(() => {
-    if (!routeFromHash()) {
-      window.addEventListener("hashchange", routeFromHash);
-    }
+    // **The listener registers whatever the page opened with.** It used to register only
+    // when there was no card hash -- so a reader who landed on a deep link, then edited the
+    // address to another one, got nothing: the page held the first card forever. A hash
+    // change is always worth routing, and a `replaceState` (which is how `openCard` and
+    // `runSearch` write it) never fires it, so the two cannot loop.
+    routeFromHash();
+    window.addEventListener("hashchange", routeFromHash);
   }).catch(showError);
 })();

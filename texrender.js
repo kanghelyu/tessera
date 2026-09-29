@@ -21,8 +21,14 @@
     eqnarray: "aligned", "eqnarray*": "aligned", split: "aligned",
     gather: "gathered", "gather*": "gathered",
     multline: "aligned", "multline*": "aligned",
-    array: "array", cases: "cases", matrix: "matrix", pmatrix: "pmatrix",
-    bmatrix: "bmatrix", vmatrix: "vmatrix", smallmatrix: "smallmatrix",
+    array: "array", "array*": "array", cases: "cases", "dcases": "cases",
+    matrix: "matrix", pmatrix: "pmatrix", bmatrix: "bmatrix", Bmatrix: "Bmatrix",
+    vmatrix: "vmatrix", Vmatrix: "Vmatrix", smallmatrix: "smallmatrix",
+    // amscd's commutative diagrams: KaTeX compiles these natively, and an arrow drawn in
+    // `CD` *is* the content -- left out of this table, a diagram would render as prose and
+    // the arrows would be read as text. `tikzcd`/`xymatrix` stay out: KaTeX has no
+    // equivalent, and those are shown as source on purpose.
+    CD: "CD",
     equation: "aligned", "equation*": "aligned", displaymath: "aligned",
   };
 
@@ -90,6 +96,29 @@
     "\\intertext": "\\text{#1}",
     // Another package's spelling of something KaTeX has.
     "\\mathds": "\\mathbb{#1}",
+    // `bbm`'s blackboard bold -- the `\mathbbm{1}` indicator character is how most of these
+    // arrive. KaTeX's `\mathbb` renders the digit, which is the same claim with another font.
+    "\\mathbbm": "\\mathbb{#1}",
+    // `mathabx`'s wide bar. KaTeX has `\overline` and no `\widebar`; the measured cases are
+    // `\widebar{\mfrak{u}}`-shaped (arXiv:1610.07973), where the overline is the content.
+    "\\widebar": "\\overline{#1}",
+    // `pzc` -- Zapf Chancery, the calligraphic alphabet of the `mathpzc` package. `\mathcal`
+    // is the standard approximation; the letter is what the formula needs.
+    "\\mathpzc": "\\mathcal{#1}",
+    // `xfrac`'s nice fraction. `#1/#2` is the plain reading; a slash fraction loses the
+    // typesetting but keeps the value, and a formula that fails to compile keeps neither.
+    "\\nicefrac": "#1/#2",
+    // Category theory's standard operators. Papers define these (`\\newcommand{\\End}`,
+    // `\\Hom`) and several tables missed them -- measured in five papers of this library.
+    "\\End": "\\operatorname{End}", "\\Hom": "\\operatorname{Hom}",
+    "\\id": "\\operatorname{id}",
+    // `upgreek`'s upright capital upsilon, the one this library failed on (arXiv:1605.00138).
+    // The rest of the package travels through `texsource._PACKAGE_MACROS`, gated on the
+    // paper's own `\\usepackage`; these two are the fallback for a paper whose preamble was
+    // never harvested. The paper's own definition wins over this table either way.
+    "\\Upupsilon": "\\mathrm{\\Upsilon}", "\\upupsilon": "\\mathrm{\\upsilon}",
+    // TeX's own no-content declarations, which ar5iv's extraction leaves inside formulas.
+    "\\selectfont": "", "\\hfill": "",
     // `euscript`'s Euler script. KaTeX has no `\EuScript` and the meaning is fixed, so this is
     // a translation rather than the paper's notation. Measured: 233 fragments of the papers
     // added on 2026-09-28, the largest single offender in the library at the time.
@@ -107,7 +136,7 @@
     alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε", varepsilon: "ε",
     eta: "η", theta: "θ", iota: "ι", kappa: "κ", lambda: "λ", mu: "μ",
     nu: "ν", xi: "ξ", pi: "π", rho: "ρ", sigma: "σ", tau: "τ", upsilon: "υ",
-    phi: "φ", varphi: "φ", chi: "χ", psi: "ψ", omega: "ω", Gamma: "Γ", Delta: "Δ",
+    phi: "ϕ", varphi: "φ", chi: "χ", psi: "ψ", omega: "ω", Gamma: "Γ", Delta: "Δ",
     Theta: "Θ", Lambda: "Λ", Xi: "Ξ", Pi: "Π", Sigma: "Σ", Phi: "Φ", Psi: "Ψ",
     Omega: "Ω", hbar: "ℏ", ell: "ℓ", varphi: "φ",
   };
@@ -316,22 +345,56 @@
     return out;
   }
 
+  /** The mechanical cleanups a formula needs before KaTeX sees it.
+   *
+   * Four, each measured, and none of them belongs in the stored statement (the card keeps
+   * the source verbatim; these are the renderer's reading):
+   *
+   * * ar5iv's extraction leaves LaTeX's *internal* macros in formulas -- `\lx@inpgf@ignorespaces`
+   *   and its `lx@` siblings are typesetting machinery from hyperref and friends, they carry no
+   *   content, and they broke 227 fragments of this library. They cannot travel in `COMPAT`
+   *   because KaTeX reads `\lx@…` as the command `\lx` and never looks up the whole name.
+   * * `\begin{array}[t]{…}`: the optional position argument is real LaTeX and KaTeX answers
+   *   it with "Unknown column alignment: '['". The vertical placement is not the content.
+   * * an environment KaTeX knows under another name (`split` → `aligned`) is rewritten by
+   *   `segments` when it is the fragment's own frame, but a `$...$` span keeps whatever
+   *   environments sit *inside* it verbatim -- so the rewrite happens here, where both cases
+   *   pass through.
+   */
+  function normaliseMath(body) {
+    return body
+      .replace(/\\lx@[A-Za-z@]+/g, "")
+      .replace(/(\\begin\{array\})\s*\[[tcb]\]/g, "$1")
+      .replace(/\\(begin|end)\{([^{}]+)\}/g, (whole, kind, name) => {
+        const mapped = Object.prototype.hasOwnProperty.call(DISPLAY_ENVS, name)
+          ? DISPLAY_ENVS[name] : null;
+        return mapped ? "\\" + kind + "{" + mapped + "}" : whole;
+      });
+  }
+
   function renderFragment(fragment, refs) {
     state.compiled += 1;
     // A bare `$` inside a math fragment is always an artefact: TeX does not allow it either
     // (an escaped `\$` is a dollar sign and is kept). Two papers in the library write
     // `\begin{cases} … & if $\xi(\lambda) < … \end{cases}`, which is invalid in the source
     // and made the whole formula fail to compile.
-    const body = translateColors(placeholderText(fragment.body, refs)
+    const body = normaliseMath(translateColors(placeholderText(fragment.body, refs)
       .replace(/\\\$/g, "\u0002").replace(/\$/g, "").replace(/\u0002/g, "\\$")
       // A bare `#` is an artefact for the same reason a bare `$` is: TeX allows neither
       // outside a macro definition, and KaTeX answers both with "Expected 'EOF'". The purifier
       // turns `\#` into `#` -- the escape is about *prose*, where a bare `#` is harmless -- so
       // the escape is restored here. Measured on arXiv:1801.06071, whose `m_i=#\{a^n(i)\}`
       // failed the whole fragment, and on a `\text{a#b}` elsewhere in the library.
-      .replace(/(?<!\\)#/g, "\\#"));
-    const base = { displayMode: !!fragment.display, throwOnError: false, strict: false,
-                   trust: true, output: "html" };
+      .replace(/(?<!\\)#/g, "\\#")));
+    // An `aligned`/`gathered` body that arrived inside `$...$` is a display formula the
+    // washer kept the delimiters of: KaTeX refuses `aligned` outside display mode with
+    // "{split} can be used only in display mode", and sixteen fragments of this library died
+    // exactly that way. Rendering it as display is what the source meant -- a line-broken
+    // formula -- not a change to the formula.
+    const displayForced = !fragment.display &&
+      /\\begin\{(aligned|gathered)\}/.test(body);
+    const base = { displayMode: displayForced || !!fragment.display, throwOnError: false,
+                   strict: false, trust: true, output: "html" };
     // Try strictly first, because that is the only way a failure is *knowable*: with
     // `throwOnError: false` KaTeX renders the error inline and never throws, so the old
     // code counted nothing and the window reported "0 failed" while showing red raw

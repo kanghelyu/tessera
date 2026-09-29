@@ -377,6 +377,20 @@ kbd {
   .graph-row { flex: 1 1 100%; }
 }
 
+/* ---------- a phone: one column, the tree capped, the graph shorter ---------- */
+/* The desktop is a two-pane window that never scrolls as a page; a phone scrolls, and the
+   tree would otherwise take the whole first screen -- so it gets a third of the viewport
+   and the graph, which the reader opens a card to see, sits within reach of one swipe. */
+@media (max-width: 880px) {
+  .layout { display: block; height: auto; }
+  .side { border-right: 0; border-bottom: 1px solid var(--line); }
+  .cards { max-height: 32vh; }
+  .main { padding: 16px 14px 60px; overflow-y: visible; }
+  .graph { height: 380px; }
+  .node-detail { width: min(330px, 90vw); }
+  .rel-side { flex: 1 1 100%; max-height: 200px; }
+}
+
 /* a tab that is running the previous app.js says so instead of lying */
 .stale {
   background: #b45309; color: #fff; font-size: 12.5px; padding: 7px 14px; text-align: center;
