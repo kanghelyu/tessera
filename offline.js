@@ -244,12 +244,12 @@
     function passes(row, info, wanted) {
       var name, values;
       for (name in wanted) {
-        // A value is compared as a case-insensitive *substring of the field*, never as a whole
-        // word, and surrounding whitespace is not part of the name -- see
-        // `Engine._passes_filters`.
-        values = (wanted[name] || []).map(function (value) { return String(value).trim(); })
-                                     .filter(function (value) { return value.length; });
-        if (!values.length) continue;
+        // A case-insensitive *substring* for the free-text fields (`author`, `paper`) and an
+        // exact value for the enumerated ones (`cluster`, `kind`) -- see
+        // `Engine._passes_filters`. Values arrive trimmed and non-blank; `searchPayload` cleaned
+        // them once, because this runs for every candidate.
+        values = wanted[name];
+        if (!values || !values.length) continue;
         if (name === "cluster") {
           if (!values.some(function (v) { return (row.cluster || "").toLowerCase() === v.toLowerCase(); })) return false;
         } else if (name === "kind") {
@@ -448,6 +448,17 @@
         wanted[name].push(value);
       }
     });
+    // Trimmed and stripped of blanks *before* anything asks whether there is a filter at all: a
+    // whitespace-only `author` used to make `wanted` non-empty, so the search took the
+    // filter-only path and then matched every row -- the whole library back from an empty box.
+    // See `Engine._clean_filters`; this runs once, not once per candidate.
+    var cleaned = {};
+    Object.keys(wanted).forEach(function (name) {
+      var kept = wanted[name].map(function (value) { return String(value).trim(); })
+                             .filter(function (value) { return value.length; });
+      if (kept.length) cleaned[name] = kept;
+    });
+    wanted = cleaned;
     var started = Date.now();
     var data = await load("search.json");
     // The filter row asks about authors, which the tree index does not carry -- `meta.json` is

@@ -437,8 +437,13 @@
     const filters = activeFilters();
     if (!text.trim() && !Object.keys(filters).length) return loadPapers();
     $("meta").textContent = t("meta.searching");
-    const query = ["k=40", "q=" + encodeURIComponent(text),
-                   "sort=" + encodeURIComponent($("f-sort").value || "relevance")];
+    const query = ["k=40", "q=" + encodeURIComponent(text)];
+    // "Relevance" is the control's default, and it is not a preference the reader expressed:
+    // sending it would override the order a filter-with-no-query falls back to (`newest` --
+    // there is nothing for a card to be relevant *to*), so the default travels as no parameter
+    // at all. An explicit "Newest first" or "Oldest first" still travels.
+    const sort = $("f-sort").value;
+    if (sort && sort !== "relevance") query.push("sort=" + encodeURIComponent(sort));
     Object.keys(filters).forEach((name) => {
       query.push(name + "=" + encodeURIComponent(filters[name]));
     });
