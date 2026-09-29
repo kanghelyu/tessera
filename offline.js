@@ -244,8 +244,12 @@
     function passes(row, info, wanted) {
       var name, values;
       for (name in wanted) {
-        values = wanted[name];
-        if (!values || !values.length) continue;
+        // A value is compared as a case-insensitive *substring of the field*, never as a whole
+        // word, and surrounding whitespace is not part of the name -- see
+        // `Engine._passes_filters`.
+        values = (wanted[name] || []).map(function (value) { return String(value).trim(); })
+                                     .filter(function (value) { return value.length; });
+        if (!values.length) continue;
         if (name === "cluster") {
           if (!values.some(function (v) { return (row.cluster || "").toLowerCase() === v.toLowerCase(); })) return false;
         } else if (name === "kind") {
@@ -300,6 +304,11 @@
     if (one !== two) return one - two;
     if (a.score !== b.score) return b.score - a.score;
     if (a.position !== b.position) return a.position - b.position;
+    // The card's place in the library, then its id: two rows that tie on every rule above are
+    // two rows the reader has no reason to see shuffled, and the id is a digest of the statement
+    // -- stable, but saying nothing about order. This is the *whole* ordering for a filter with
+    // no query text, where every rule above sits at its floor.
+    if (a.ordinal !== b.ordinal) return a.ordinal - b.ordinal;
     return a.card_id < b.card_id ? -1 : a.card_id > b.card_id ? 1 : 0;
   }
 
@@ -449,10 +458,16 @@
     var plan = engine.expand(raw);
     var significant = plan.terms.filter(function (term) { return !STOPWORDS.has(term); });
     var unique = Array.from(new Set(significant)).sort();
+    // **A filter with no query text is the whole question** -- see `Engine.search`. The filters
+    // select the rows, and with nothing matched there is nothing to rank by, so the answer is
+    // ordered newest paper first, then the order the cards were written in.
+    var filterOnly = !unique.length && Object.keys(wanted).length > 0;
+    sort = sort || (filterOnly ? "newest" : "relevance");
     var scored = engine.scores(plan.terms);
-    var pool = Object.keys(scored).map(Number).sort(function (a, b) {
-      return scored[b] - scored[a] || (data.docs[a].card_id < data.docs[b].card_id ? -1 : 1);
-    }).slice(0, Math.max(SEARCH_POOL, limit * 20));
+    var pool = filterOnly ? data.docs.map(function (_doc, ordinal) { return ordinal; })
+      : Object.keys(scored).map(Number).sort(function (a, b) {
+          return scored[b] - scored[a] || (data.docs[a].card_id < data.docs[b].card_id ? -1 : 1);
+        }).slice(0, Math.max(SEARCH_POOL, limit * 20));
 
     var idOf = Object.create(null);
     data.terms.forEach(function (entry, id) { idOf[entry[0]] = id; });
@@ -461,24 +476,32 @@
       var row = data.docs[ordinal];
       var info = meta[row.source_id] || {};
       if (!engine.passes(row, info, wanted)) return;
-      var tokens = data.tokens[ordinal].map(function (id) { return data.terms[id][0]; });
-      var present = new Set(tokens);
-      var matched = unique.filter(function (term) { return present.has(term); });
-      if (!matched.length) return;
-      var labelTokens = new Set(tokenize(row.label));
-      var span = engine.window(tokens, matched);
-      var position = tokens.length;
-      for (var index = 0; index < tokens.length; index += 1) {
-        if (matched.indexOf(tokens[index]) >= 0) { position = index; break; }
-      }
-      var typos = 0;
-      matched.forEach(function (term) {
-        if (unique.indexOf(term) >= 0) return;
-        Object.keys(plan.corrections).forEach(function (typed) {
-          if (plan.corrections[typed].indexOf(term) >= 0 && unique.indexOf(typed) < 0) typos += 1;
+      var matched, labelTokens, span, position, typos = 0;
+      if (filterOnly) {
+        // Nothing was matched, so every match-shaped field sits at its floor and the comparison
+        // reduces to the paper's year and the card's place in the library. Skipping the token
+        // walk is not only tidier: it is most of the cost of a row.
+        matched = []; labelTokens = new Set(); span = [0, 0]; position = 0;
+      } else {
+        var tokens = data.tokens[ordinal].map(function (id) { return data.terms[id][0]; });
+        var present = new Set(tokens);
+        matched = unique.filter(function (term) { return present.has(term); });
+        if (!matched.length) return;
+        labelTokens = new Set(tokenize(row.label));
+        span = engine.window(tokens, matched);
+        position = tokens.length;
+        for (var index = 0; index < tokens.length; index += 1) {
+          if (matched.indexOf(tokens[index]) >= 0) { position = index; break; }
+        }
+        matched.forEach(function (term) {
+          if (unique.indexOf(term) >= 0) return;
+          Object.keys(plan.corrections).forEach(function (typed) {
+            if (plan.corrections[typed].indexOf(term) >= 0 && unique.indexOf(typed) < 0) typos += 1;
+          });
         });
-      });
-      results.push({ card_id: row.card_id, score: Math.round(scored[ordinal] * 10000) / 10000,
+      }
+      results.push({ card_id: row.card_id,
+                     score: filterOnly ? 0 : Math.round(scored[ordinal] * 10000) / 10000,
                      label: row.label, kind: row.kind, cluster: row.cluster,
                      source_id: row.source_id, paper_title: info.title || row.source_id,
                      paper_authors: info.authors || [], paper_year: info.year || "",
@@ -487,7 +510,7 @@
                      coverage: unique.length ? Math.round(matched.length / unique.length * 100) / 100 : 0,
                      typos: typos, window: span[0], out_of_order: span[1],
                      in_label: matched.some(function (term) { return labelTokens.has(term); }),
-                     position: position });
+                     position: position, ordinal: ordinal });
     });
     results.sort(function (a, b) { return compareRows(a, b, sort); });
     var shown = results.slice(0, limit);
@@ -502,10 +525,13 @@
       if (redefined[row.source_id]) overrides[row.source_id] = redefined[row.source_id];
     });
     return { query: query, text: parsed.text, tokenizer: raw.length ? "vendor" : "empty",
-             results: shown, hit_count: complete.length,
+             results: shown,
+             // Every row that passed a filter-with-no-query is a hit, and how many there are is
+             // what the reader asked for; see `Engine.search`.
+             hit_count: filterOnly ? results.length : complete.length,
              miss: Boolean(missing.length) || !complete.length, decisive_terms: unique,
              corrected: plan.corrections, unmatched: plan.unmatched, filters: wanted,
-             sort: sort || "relevance", index_docs: data.docs.length, facets: null,
+             sort: sort, index_docs: data.docs.length, facets: null,
              took_ms: Date.now() - started, macros: macros, macros_override: overrides };
   }
 
