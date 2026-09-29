@@ -85,7 +85,10 @@
       "node.noabstract": "(no abstract harvested)",
       "node.open": "Open card →",
       "node.openfirst": "Open card · {label} →",
-      "paper.meta": "{year} · {cards} cards · {results} conclusions",
+      "paper.meta": "{year} · {cards} cards",
+      "paper.meta.hits": "{year} · {cards} cards · {hits} matching",
+      "author.filter": "Every paper by {name}",
+      "author.more": "+{n} more",
       "card.nolabel": "(unlabelled)",
       "depth": "depth {n}",
       "role.focus": "focus",
@@ -164,7 +167,10 @@
       "node.noabstract": "（未收录摘要）",
       "node.open": "打开卡片 →",
       "node.openfirst": "打开卡片 · {label} →",
-      "paper.meta": "{year} · {cards} 张 · {results} 结论",
+      "paper.meta": "{year} · {cards} 张",
+      "paper.meta.hits": "{year} · {cards} 张 · 命中 {hits} 张",
+      "author.filter": "查看 {name} 的全部论文",
+      "author.more": "另有 {n} 位",
       "card.nolabel": "（无标号）",
       "depth": "深度 {n}",
       "role.focus": "焦点",
@@ -331,8 +337,13 @@
       title.textContent = entry.paper.title || entry.paper.source_id;
       const meta = document.createElement("span");
       meta.className = "p-meta";
-      meta.textContent = t("paper.meta", { year: entry.paper.year || "",
-        cards: entry.paper.cards || 0, results: entry.paper.results || 0 });
+      // A search's row says how much of the paper matched; the browse list says how big it is.
+      // Two sentences, because "34 cards · 0 conclusions" was neither.
+      meta.textContent = entry.paper.searching
+        ? t("paper.meta.hits", { year: entry.paper.year || "",
+                                 cards: entry.paper.cards || 0,
+                                 hits: entry.paper.hits || 0 })
+        : t("paper.meta", { year: entry.paper.year || "", cards: entry.paper.cards || 0 });
       top.append(title, meta);
       item.append(top);
       const inner = document.createElement("ul");
@@ -449,20 +460,23 @@
     });
     const payload = await api("/api/search?" + query.join("&"));
     renderFacets(payload.facets);
-    // Grouped by paper, because the paper is the level the reader navigates: a hit is shown
-    // under the paper it came from, with that paper already open.
-    const groups = [];
+    // **The panel is the answer's *paper* list, not the papers the returned rows come from.**
+    // Grouping the rows made the panel lie: `author:futorny` matches 142 papers and 4776 cards,
+    // but the top 40 rows all come from 3 papers, so it said "Papers 3" beside a header reading
+    // "4776 hits" -- and that reads as "the filter found 3 papers". The list travels with the
+    // answer now (see `Engine.search`), so the panel can name every paper the filter selected.
     const index = {};
+    const groups = (payload.papers || []).map((paper) => {
+      const group = { paper: { source_id: paper.source_id, title: paper.title || paper.source_id,
+                               year: paper.year || "", cards: paper.cards || 0,
+                               hits: paper.hits || 0, searching: true },
+                      cards: [], macros: (payload.macros || {})[paper.source_id] || {} };
+      index[paper.source_id] = group;
+      return group;
+    });
     (payload.results || []).forEach((row) => {
-      const key = row.source_id;
-      if (!(key in index)) {
-        index[key] = { paper: { source_id: key, title: row.paper_title || key, year: "",
-                                cards: 0, results: 0 },
-                       cards: [], macros: (payload.macros || {})[key] || {} };
-        groups.push(index[key]);
-      }
-      index[key].cards.push(row);
-      index[key].paper.results = index[key].cards.length;
+      const group = index[row.source_id];
+      if (group) group.cards.push(row);
     });
     renderPapers(groups);
     const parts = [t("meta.hits", { n: payload.hit_count }),
@@ -491,6 +505,38 @@
   }
 
   /* ---------------- card detail ---------------- */
+  /** A paper's authors, each one a control that filters the search to that person.
+   *
+   * A card is one statement out of a paper, and a reader who has just read it and wants the rest
+   * of what this person wrote should not have to retype their name -- nor get a *different*
+   * answer for having done so. Clicking resolves the name the same way typing it does
+   * (`Engine.author_index` groups arXiv's spellings of one person), so clicking `V. Futorny`
+   * finds the same papers as typing `Vyacheslav Futorny`: all of them, not just the 131 that
+   * spell the given name out.
+   */
+  function authorChips(authors, limit) {
+    const names = (authors || []);
+    const out = names.slice(0, limit).map((name) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "author";
+      chip.textContent = name;
+      chip.title = t("author.filter", { name: name });
+      chip.addEventListener("click", () => {
+        $("f-author").value = name;
+        runSearch($("q").value).catch(showError);
+      });
+      return chip;
+    });
+    if (names.length > out.length) {
+      const more = document.createElement("span");
+      more.className = "author-more";
+      more.textContent = t("author.more", { n: names.length - out.length });
+      out.push(more);
+    }
+    return out;
+  }
+
   async function openCard(cardId) {
     const payload = await api("/api/card/" + encodeURIComponent(cardId));
     state.card = payload;
@@ -502,9 +548,15 @@
     // Who wrote it. A card is one statement out of a paper, and reading it without the title
     // and the authors beside it is reading a quotation with no source.
     $("paper-title").textContent = paper.title || paper.source_id;
-    const who = (paper.authors || []).slice(0, 8).join(", ");
-    $("paper-meta").textContent = [who, paper.year, paper.source_id]
-      .filter(Boolean).join(" · ");
+    const meta = $("paper-meta");
+    meta.textContent = "";
+    authorChips(paper.authors, 8).forEach((node) => meta.append(node));
+    [paper.year, paper.source_id].filter(Boolean).forEach((value) => {
+      const fact = document.createElement("span");
+      fact.className = "paper-fact";
+      fact.textContent = value;
+      meta.append(fact);
+    });
     $("card-label").textContent = card.label || card.kind;
     const chips = $("card-chips");
     chips.textContent = "";
@@ -1174,9 +1226,18 @@
       node.textContent = text;
       return node;
     };
-    const line = (text, className) => {
+    /** One line of the node panel. It takes nodes as well as text, because the authors on it are
+     *  controls -- clicking one filters the search to that person (see `authorChips`). */
+    const line = (content, className) => {
       const node = document.createElement("div");
       node.className = className || "d-meta";
+      if (Array.isArray(content)) content.forEach((item) => node.append(item));
+      else node.textContent = content;
+      return node;
+    };
+    const fact = (text) => {
+      const node = document.createElement("span");
+      node.className = "paper-fact";
       node.textContent = text;
       return node;
     };
@@ -1219,8 +1280,8 @@
     if (sourceId) {
       const paper = await api("/api/paper?source_id=" + encodeURIComponent(sourceId));
       panel.append(heading(paper.title || sourceId));
-      const who = (paper.authors || []).slice(0, 6).join(", ");
-      panel.append(line([who, paper.year, paper.cluster].filter(Boolean).join(" · ")));
+      panel.append(line(authorChips(paper.authors, 6)
+        .concat([paper.year, paper.cluster].filter(Boolean).map(fact))));
       const body = document.createElement("div");
       body.className = "d-body";
       if (TEX) TEX.setMacros(paper.macros, sourceId, paper.macros_override);
@@ -1239,9 +1300,8 @@
     const card = payload.card || {};
     const paper = payload.paper || {};
     panel.append(heading((card.label || t("card.nolabel")) + "  ·  " + (card.kind || "")));
-    const who = (paper.authors || []).slice(0, 6).join(", ");
-    panel.append(line([paper.title || card.source_id || "", who, paper.year]
-      .filter(Boolean).join(" · ")));
+    panel.append(line([document.createTextNode(paper.title || card.source_id || "")]
+      .concat(authorChips(paper.authors, 6), [paper.year].filter(Boolean).map(fact))));
     const body = document.createElement("div");
     body.className = "d-body";
     if (TEX) TEX.setMacros(paper.macros, card.source_id, paper.macros_override);

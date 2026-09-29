@@ -134,6 +134,17 @@ body {
 .paper-head { margin-bottom: 14px; }
 .paper-title { font-size: 13.5px; font-weight: 600; line-height: 1.5; }
 .paper-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
+/* The authors are controls: one click filters the search to that person. They are styled as text
+   rather than as buttons, because a row of buttons beside a title reads as a toolbar and not as a
+   byline -- the dotted rule is the whole affordance, and it survives both themes. Not scoped to
+   `.paper-meta`: the graph's node panel shows the same byline and the same control. */
+.author {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer;
+  border-bottom: 1px dotted currentColor; margin-right: 8px;
+}
+.author:hover { color: var(--text); border-bottom-style: solid; }
+.author:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.author-more, .paper-fact { color: var(--muted); margin-right: 8px; }
 .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .card-label { font-size: 20px; font-weight: 660; letter-spacing: .2px; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }

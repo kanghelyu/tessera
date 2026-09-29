@@ -121,10 +121,11 @@
   }
 
   /* ---------------- the search pipeline (mirrors `engine.search`) ---------------- */
-  function searcher(data, meta) {
+  function searcher(data, meta, authors) {
     var terms = data.terms;
     var byTerm = Object.create(null);
     var buckets = Object.create(null);
+    var authorCache = Object.create(null);
     terms.forEach(function (entry, id) {
       byTerm[entry[0]] = { id: id, rows: entry[1] };
       var key = entry[0].slice(0, 1) + "|" + entry[0].length;
@@ -241,13 +242,39 @@
       return [best, disordered];
     }
 
+    /** The author keys a filter value names, or null when it names nobody in the library.
+     *
+     * A value names a person when all of its words appear among the words of one of that
+     * person's spellings -- `futorny`, `Vyacheslav`, `V. Futorny` and `Futorny V.` all name the
+     * same person, and `li` names the people called Li rather than the papers by Liu. A value
+     * that names nobody returns null and `passes` falls back to a substring. See
+     * `Engine._resolve_authors`; memoised for the same reason.
+     */
+    function resolveAuthors(value) {
+      var text = String(value == null ? "" : value).trim().toLowerCase();
+      if (text.length < 2) return null;
+      if (text in authorCache) return authorCache[text];
+      var wanted = authorWords(text), keys = [];
+      Object.keys(authors).forEach(function (key) {
+        var words = authors[key].spellings || [];
+        for (var i = 0; i < words.length; i += 1) {
+          var have = authorWords(words[i]), ok = true;
+          for (var j = 0; j < wanted.length; j += 1) {
+            if (have.indexOf(wanted[j]) < 0) { ok = false; break; }
+          }
+          if (ok) { keys.push(key); return; }
+        }
+      });
+      authorCache[text] = keys.length ? keys : null;
+      return authorCache[text];
+    }
+
     function passes(row, info, wanted) {
       var name, values;
       for (name in wanted) {
-        // A case-insensitive *substring* for the free-text fields (`author`, `paper`) and an
-        // exact value for the enumerated ones (`cluster`, `kind`) -- see
-        // `Engine._passes_filters`. Values arrive trimmed and non-blank; `searchPayload` cleaned
-        // them once, because this runs for every candidate.
+        // `author` names a person before it matches letters; `paper` is a substring; `cluster`
+        // and `kind` are exact values. See `Engine._passes_filters`. Values arrive trimmed and
+        // non-blank; `searchPayload` cleaned them once, because this runs for every candidate.
         values = wanted[name];
         if (!values || !values.length) continue;
         if (name === "cluster") {
@@ -257,8 +284,7 @@
         } else if (name === "paper") {
           if (!values.some(function (v) { return (row.source_id || "").toLowerCase().indexOf(v.toLowerCase()) >= 0; })) return false;
         } else if (name === "author") {
-          var names = ((info && info.authors) || []).join(" ; ").toLowerCase();
-          if (!values.some(function (v) { return names.indexOf(v.toLowerCase()) >= 0; })) return false;
+          if (!values.some(function (v) { return authorMatches(v, info); })) return false;
         } else if (name === "year") {
           var year = (info && info.year) || "";
           if (!values.some(function (v) { return yearMatches(year, v); })) return false;
@@ -267,8 +293,31 @@
       return true;
     }
 
+    function authorMatches(value, info) {
+      var names = ((info && info.authors) || []).join(" ; ").toLowerCase();
+      var keys = resolveAuthors(value);
+      if (keys === null) return names.indexOf(String(value).trim().toLowerCase()) >= 0;
+      return keys.some(function (key) {
+        return (authors[key].spellings || []).some(function (spelling) {
+          return names.indexOf(spelling.toLowerCase()) >= 0;
+        });
+      });
+    }
+
     return { expand: expand, scores: scores, window: window, passes: passes,
              frequency: frequency };
+  }
+
+  /** An author string's words, periods stripped: `V. M. Futorny` -> `['v', 'm', 'futorny']`.
+   *
+   * The same function as `Engine._author_words`, and it has to stay the same function: the
+   * cross-implementation test compares the two engines' answers, and a different idea of what a
+   * word is would show up as a different set of papers.
+   */
+  function authorWords(name) {
+    return String(name == null ? "" : name).toLowerCase().split(/\s+/)
+      .map(function (word) { return word.replace(/\./g, ""); })
+      .filter(function (word) { return word.length; });
   }
 
   function yearMatches(year, wanted) {
@@ -464,7 +513,10 @@
     // The filter row asks about authors, which the tree index does not carry -- `meta.json` is
     // `Engine.papers_meta`, the same map the server filters on.
     var meta = await load("meta.json");
-    var engine = searcher(data, meta);
+    // ...and `authors.json` is `Engine.author_index`: the people, and how arXiv spells them. The
+    // author filter names a person, so the browser needs the same table the server has.
+    var authors = await load("authors.json");
+    var engine = searcher(data, meta, authors);
     var raw = tokenizeQuery(parsed.text);
     var plan = engine.expand(raw);
     var significant = plan.terms.filter(function (term) { return !STOPWORDS.has(term); });
@@ -524,6 +576,22 @@
                      position: position, ordinal: ordinal });
     });
     results.sort(function (a, b) { return compareRows(a, b, sort); });
+    // **The paper list the side panel navigates by**, computed from every matching row rather
+    // than from the rows that fit in `limit` -- see `Engine.search`. Grouping the *returned* rows
+    // made the panel say "Papers 3" for a filter that matched 142 papers.
+    var sizes = Object.create(null);
+    data.docs.forEach(function (doc) { sizes[doc.source_id] = (sizes[doc.source_id] || 0) + 1; });
+    var order = [], hits = Object.create(null);
+    results.forEach(function (row) {
+      if (!(row.source_id in hits)) { hits[row.source_id] = 0; order.push(row.source_id); }
+      hits[row.source_id] += 1;
+    });
+    var papers = order.map(function (sourceId) {
+      var info = meta[sourceId] || {};
+      return { source_id: sourceId, title: info.title || sourceId, year: info.year || "",
+               cluster: info.cluster || "", authors: info.authors || [],
+               cards: sizes[sourceId] || 0, hits: hits[sourceId] };
+    });
     var shown = results.slice(0, limit);
     var complete = shown.filter(function (row) { return row.matched_count === unique.length; });
     var missing = plan.unmatched.filter(function (term) { return term.length >= MIN_TERM; });
@@ -542,7 +610,8 @@
              hit_count: filterOnly ? results.length : complete.length,
              miss: Boolean(missing.length) || !complete.length, decisive_terms: unique,
              corrected: plan.corrections, unmatched: plan.unmatched, filters: wanted,
-             sort: sort, index_docs: data.docs.length, facets: null,
+             sort: sort, papers: papers, paper_count: papers.length,
+             index_docs: data.docs.length, facets: null,
              took_ms: Date.now() - started, macros: macros, macros_override: overrides };
   }
 
