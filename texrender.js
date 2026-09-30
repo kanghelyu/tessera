@@ -213,7 +213,14 @@
         // arXiv:1801.06071 redefines `\H` to mean cohomology; KaTeX's `\H` is an accent, so
         // filtering it left every `\H^*` in the paper broken.
         if (katexKnows(name) && !forced[name]) return;
-        filtered["\\" + name] = table[name];
+        // `\boldmath` inside a *macro definition* (`\gb` expands to `\mbox{\boldmath $#1$}`,
+        // `\mat` to `\mbox{\boldmath{$#1$}}`) never reaches `rewriteBoldmath` in the fragment
+        // itself -- the rewrite runs before KaTeX expands anything. 169 fragments failed
+        // exactly there. In a definition the declaration is **dropped, not converted**: it
+        // sits inside an `\mbox` (which COMPAT spells `\text`), and a `\boldsymbol` there is
+        // "a function in text mode" -- the same failure in different clothes. The boldness is
+        // decoration; the mathematics inside the `$…$` survives.
+        filtered["\\" + name] = rewriteBoldmath(String(table[name]));
       });
       macroCache[key] = { own: filtered, all: Object.assign({}, COMPAT, filtered) };
     }
@@ -365,11 +372,220 @@
     return body
       .replace(/\\lx@[A-Za-z@]+/g, "")
       .replace(/(\\begin\{array\})\s*\[[tcb]\]/g, "$1")
+      // `\quadsuch` is `\quad such` with the space swallowed on its way through the source
+      // (a comment line, an ar5iv extraction) -- one command that KaTeX does not have and
+      // no macro table carries. Splitting it back apart is the source's own sentence.
+      .replace(/\\(quad|qquad)(?=[a-zA-Z])/g, "\\\\$1 ")
       .replace(/\\(begin|end)\{([^{}]+)\}/g, (whole, kind, name) => {
         const mapped = Object.prototype.hasOwnProperty.call(DISPLAY_ENVS, name)
           ? DISPLAY_ENVS[name] : null;
         return mapped ? "\\" + kind + "{" + mapped + "}" : whole;
       });
+  }
+
+  /** `\boldmath` is a *declaration* -- illegal in mathematics and unknown to KaTeX -- and it
+   * reaches the renderer through the papers' own macros (`\gb` = `\mbox{\boldmath $#1$}`,
+   * arXiv:0711.0793; `\mat` = `\mbox{\boldmath{$#1$}}`, arXiv:2406.15929; 169 fragments of
+   * the library failed there). What the authors meant, in every spelling, is one **bold
+   * symbol**, and the renderer has exactly that: `\boldsymbol`.
+   *
+   * Four passes, none of them allowed to cross a group boundary (a greedy `\mbox{…}`
+   * match once swallowed the *outer* brace and left a definition that could not close):
+   *
+   * * `\boldmath $x$` → `\boldsymbol{x}` -- the math span is the content;
+   * * `\boldmath {x}` → `\boldsymbol{x}`;
+   * * `\mbox{\boldsymbol{x}}` → `\boldsymbol{x}` -- the box existed to make the declaration
+   *   text-legal, and COMPAT spells `\mbox` as `\text`, where `\boldsymbol` is illegal again;
+   * * a bare `\boldmath` carried no content and is dropped.
+   */
+  function rewriteBoldmath(body) {
+    return String(body)
+      // each pattern consumes only braces that belong to it, and no `$` travels into the
+      // replacement: a `$` inside a macro expansion is a delimiter in mathematics
+      .replace(/\\boldmath\s*\{(\$[^$]*\$)\}/g, (whole, inner) => "\\boldsymbol{" + inner.replace(/\$/g, "") + "}")
+      .replace(/\\boldmath\s*\$([^$]*)\$/g, "\\boldsymbol{$1}")
+      .replace(/\\boldmath\s*\{([^{}]*)\}/g, "\\boldsymbol{$1}")
+      .replace(/\\mbox\s*\{\s*\\boldsymbol\s*\{((?:[^{}]|\{[^{}]*\})*)\}\s*\}/g,
+               "\\boldsymbol{$1}")
+      .replace(/\\boldmath/g, "");
+  }
+
+  /** Wrap the mathematics a `\text{…}` swallowed into `$…$`, so KaTeX can compile it.
+   *
+   * Papers -- and ar5iv's extraction especially -- write conditions as
+   * `\text{{\cal S}:U\to \mathbb C^{n\times n} is an analytic function}`: prose and
+   * mathematics mashed into one text argument. KaTeX refuses every mathematics command in
+   * text mode, and the whole fragment went red. LaTeX's own standard spelling for the same
+   * thing is `$…$` *inside* the text, and KaTeX accepts exactly that -- measured, every
+   * command this library failed on in text mode compiles once wrapped.
+   *
+   * The split is heuristic and deliberately tight, because a wrong cut renders different
+   * mathematics. A run starts at a command, an `_`/`^`, or a group containing a command; it
+   * grows over commands and their arguments, sub/superscripts, single capitals and digits,
+   * operators, brackets and balanced groups; it stops before two or more lower-case letters
+   * followed by a word boundary -- the start of English prose. A run that never started,
+   * or text the pass is unsure about, is left exactly as it was: this rewrite only ever runs
+   * on a fragment whose faithful render already failed, so the worst case is the red source
+   * the reader sees today.
+   */
+  const TEXT_SAFE = new Set(["text", "rm", "bf", "it", "emph", "hspace", "quad",
+                             "qquad", "enspace", "thinspace", "label", "ref", "eqref"]);
+  const RUN_CONTINUATION = /[0-9A-Z_\'\u2019\*]/;
+  const PROSE_AHEAD = /^[a-z]{2,}(?![A-Za-z])/;
+  // built from a string, because a regex literal cannot carry its own line breaks
+  const SINGLE_ARG_COMMAND = new RegExp("^(?:" + [
+    "mathbb", "mathcal", "mathfrak", "mathbf", "mathsf", "mathtt", "mathscr", "mathord",
+    "mathbin", "mathrel", "mathrm", "boldsymbol", "operatorname", "overline", "underline",
+    "widehat", "widetilde", "widecheck", "bar", "hat", "tilde", "vec", "dot", "ddot",
+    "breve", "acute", "check", "mathop", "xrightarrow", "xleftarrow", "overset",
+    "underset", "stackrel", "boxed", "fbox", "pmb", "bm",
+  ].join("|") + ")$");
+
+  function groupEnd(text, start) {
+    // `start` sits on `{`; returns the index after the matching `}`, or -1
+    let depth = 0;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (char === "\\") { index += 1; continue; }
+      if (char === "{") depth += 1;
+      else if (char === "}") {
+        depth -= 1;
+        if (!depth) return index + 1;
+      }
+    }
+    return -1;
+  }
+
+  /** Does `position` begin a mathematics run inside a text argument? */
+  function isMathTrigger(content, position) {
+    const char = content[position];
+    if (char === "^" || char === "_") return true;
+    if (char === "{") {
+      const end = groupEnd(content, position);
+      return end > 0 && /\\[A-Za-z]/.test(content.slice(position, end));
+    }
+    if (char === "\\") {
+      const match = /^\\([A-Za-z]+)/.exec(content.slice(position));
+      return !!match && !TEXT_SAFE.has(match[1]);
+    }
+    return false;
+  }
+
+  /** Grow a mathematics run from `start`; returns the index one past its end.
+   *
+   * The run swallows commands and their arguments, sub/superscripts, balanced groups,
+   * single capitals and digits (variables), operators and brackets. It stops before English
+   * prose: a space followed by two or more lower-case letters at a word boundary is where
+   * the sentence resumes.
+   */
+  function growRun(content, start) {
+    let position = start;
+    while (position < content.length) {
+      const char = content[position];
+      if (char === "\\") {
+        const match = /^\\([A-Za-z]+)/.exec(content.slice(position));
+        if (!match) { position += 2; continue; }
+        position += match[0].length;
+        if (SINGLE_ARG_COMMAND.test(match[1].replace(/\s+/g, ""))) {
+          const argument = /^\s*((?:\{[^{}]*\})|(?:\\[A-Za-z]+)|\S)/.exec(content.slice(position));
+          if (argument) position += argument[0].length;
+        }
+        continue;
+      }
+      if (char === "^" || char === "_") {
+        const argument = /^((?:\s*\{[^{}]*\})|(?:\s*\\[A-Za-z]+)|(?:\s?\S))/.exec(content.slice(position + 1));
+        position += 1 + (argument ? argument[0].length : 0);
+        continue;
+      }
+      if (char === "{") {
+        const end = groupEnd(content, position);
+        if (end < 0) return content.length;
+        position = end;
+        continue;
+      }
+      if (char === " ") {
+        const rest = content.slice(position + 1);
+        if (PROSE_AHEAD.test(rest)) return position;
+        position += 1;
+        continue;
+      }
+      if (RUN_CONTINUATION.test(char) || "()[]{}=+*/|<>!?:;,.\\-".indexOf(char) >= 0) {
+        position += 1;
+        continue;
+      }
+      // A single lower-case letter is a variable and belongs to the run -- `\gb r` must not
+      // be cut between a command and its own argument. A run of two or more lower-case
+      // letters followed by a word boundary is English prose, and it stops the run here.
+      if (/[a-z]/.test(char)) {
+        const word = /^[a-z]+/.exec(content.slice(position))[0];
+        const after = content.slice(position + word.length);
+        if (word.length >= 2 && /^[\s,.:;)?!]|^$/.test(after)) return position;
+        position += 1;
+        continue;
+      }
+      return position;
+    }
+    return position;
+  }
+
+  /** Pull one preceding variable-like token (`X`, `0`, `)`) into the run.
+   *
+   * `of the entries of X\in U` starts its run at `\in`, but the `X` is mathematics too;
+   * a lower-case letter is where the prose was, so it stops there.
+   */
+  function extendLeft(content, start) {
+    let position = start;
+    for (;;) {
+      let cursor = position - 1;
+      while (cursor >= 0 && content[cursor] === " ") cursor -= 1;
+      if (cursor >= 0 && RUN_CONTINUATION.test(content[cursor])) { position = cursor; continue; }
+      return position;
+    }
+  }
+
+  /** The `\text` argument with every mathematics run wrapped in `$…$`. */
+  function rewriteMathRuns(content) {
+    const runs = [];
+    let index = 0;
+    while (index < content.length) {
+      if (isMathTrigger(content, index)) {
+        const end = growRun(content, index);
+        const start = extendLeft(content, index);
+        if (start < end) {
+          if (runs.length && start <= runs[runs.length - 1][1]) {
+            runs[runs.length - 1][1] = Math.max(runs[runs.length - 1][1], end);
+          } else {
+            runs.push([start, end]);
+          }
+          index = end;
+          continue;
+        }
+      }
+      index += 1;
+    }
+    if (!runs.length) return content;
+    let out = "";
+    let cursor = 0;
+    runs.forEach(function (run) {
+      out += content.slice(cursor, run[0]) + "$" + content.slice(run[0], run[1]) + "$";
+      cursor = run[1];
+    });
+    return out + content.slice(cursor);
+  }
+
+  function rewriteTextMath(body) {
+    const source = String(body);
+    let out = "";
+    let index = 0;
+    for (;;) {
+      const at = source.indexOf("\\text{", index);
+      if (at < 0) { out += source.slice(index); break; }
+      const end = groupEnd(source, at + 5);
+      if (end < 0) { out += source.slice(index); break; }
+      out += source.slice(index, at + 6) + rewriteMathRuns(source.slice(at + 6, end - 1)) + "}";
+      index = end;
+    }
+    return out;
   }
 
   function renderFragment(fragment, refs) {
@@ -399,17 +615,31 @@
     // `throwOnError: false` KaTeX renders the error inline and never throws, so the old
     // code counted nothing and the window reported "0 failed" while showing red raw
     // commands. The paper's macros are tried before the bare renderer, so a formula that
-    // would have rendered without them is not lost because of one bad macro.
+    // would have rendered without them is not lost because of one bad macro. The **last**
+    // layer is the rewritten body: the equivalent spelling KaTeX accepts (`\text{…}`'s
+    // swallowed mathematics wrapped in `$…$`, `\boldmath` as `\boldsymbol`). It runs only
+    // on a body whose faithful spelling already failed, so a formula that compiles as
+    // written is never touched -- and if the rewrite also fails, the reader sees the same
+    // red source they would have seen anyway.
+    const rewritten = rewriteTextMath(rewriteBoldmath(body));
     const strict = [];
     if (Object.keys(state.macros).length) {
       strict.push(Object.assign({}, base, { macros: state.macros, throwOnError: true }));
     }
     strict.push(Object.assign({}, base, { throwOnError: true }));
+    if (rewritten !== body) {
+      if (Object.keys(state.macros).length) {
+        strict.push(Object.assign({}, base, { macros: state.macros, throwOnError: true,
+                                              strict: false, _rewritten: true }));
+      }
+      strict.push(Object.assign({}, base, { throwOnError: true, _rewritten: true }));
+    }
     let lastError = null;
     let firstError = null;
     for (const options of strict) {
+      const attempt = options._rewritten ? rewritten : body;
       try {
-        const html = state.katex.renderToString(body, options);
+        const html = state.katex.renderToString(attempt, options);
         // A strict render that comes back *marked* is still a failure. `\Z` does not throw
         // and is not compiled, so counting only thrown errors reported a clean page while the
         // reader saw red -- the third time this check has been the bug.
