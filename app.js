@@ -24,6 +24,7 @@
       "meta.ms": "{n} ms",
       "meta.miss": "nothing in the library",
       "meta.corrected": "searched as: {list}",
+      "meta.author": "author: {name}",
       "meta.unmatched": "no card has: {list}",
       "meta.partial": "closest matches (no card has every word)",
       "filter.anyfield": "Any field",
@@ -109,6 +110,7 @@
       "meta.ms": "{n} ms",
       "meta.miss": "库内未命中",
       "meta.corrected": "按词形匹配：{list}",
+      "meta.author": "作者：{name}",
       "meta.unmatched": "库内没有这些词：{list}",
       "meta.partial": "最接近的结果（没有卡片包含全部词）",
       "filter.anyfield": "任意领域",
@@ -513,6 +515,11 @@
     // worse than one that answers nothing.
     const corrected = payload.corrected || {};
     const fixes = Object.keys(corrected);
+    if (payload.author_resolved) {
+      // the query was a person's name and is answered as one: say so, or the reader cannot
+      // tell why "futorny" answers with papers whose text never mentions the word
+      parts.push(t("meta.author", { name: payload.author_resolved }));
+    }
     if (fixes.length) {
       parts.push(t("meta.corrected", {
         list: fixes.slice(0, 3).map((term) => term + " → " + corrected[term].join(" / "))

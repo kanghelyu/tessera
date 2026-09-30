@@ -373,7 +373,8 @@
     }
 
     return { expand: expand, scores: scores, window: window, passes: passes,
-             frequency: frequency, data: data, sizes: sizes, meta: meta };
+             frequency: frequency, data: data, sizes: sizes, meta: meta,
+             authors: authors, resolveAuthors: resolveAuthors };
   }
 
   /** An author string's words, periods stripped: `V. M. Futorny` -> `['v', 'm', 'futorny']`.
@@ -609,8 +610,40 @@
     // select the rows, and with nothing matched there is nothing to rank by, so the answer is
     // ordered newest paper first, then the order the cards were written in.
     var filterOnly = !unique.length && Object.keys(wanted).length > 0;
-    sort = sort || (filterOnly ? "newest" : "relevance");
     var scored = engine.scores(plan.terms);
+    // **A person's name typed as words is a person question** -- see `Engine.search`. The
+    // byline is not in the index, so `futorny` reached only the statements that mention the
+    // man while 142 papers sat one author filter away. When the whole free text resolves to
+    // a person and the BM25 reach is a rounding error of that person's output, the query
+    // becomes an author filter, answered the filter-only way. Mirrors the server exactly,
+    // including the factor of four.
+    var authorResolved = null;
+    if (!filterOnly && !wanted.author && parsed.text.trim()) {
+      var nameKeys = engine.resolveAuthors(parsed.text.trim());
+      if (nameKeys) {
+        var wantedSpellings = Object.create(null);
+        nameKeys.forEach(function (key) {
+          ((engine.authors[key] || {}).spellings || []).forEach(function (spelling) {
+            wantedSpellings[spelling] = true;
+          });
+        });
+        var personCards = 0;
+        Object.keys(meta).forEach(function (sourceId) {
+          var list = meta[sourceId].authors || [];
+          for (var i = 0; i < list.length; i += 1) {
+            if (wantedSpellings[list[i]]) { personCards += engine.sizes[sourceId] || 0; break; }
+          }
+        });
+        if (Object.keys(scored).length * 4 < personCards) {
+          authorResolved = (engine.authors[nameKeys[0]] || {}).name || null;
+          wanted.author = [parsed.text.trim()];
+          filterOnly = true;
+          // the query has been answered as a name; "no card has: futorny" is no longer true
+          plan.unmatched = [];
+        }
+      }
+    }
+    sort = sort || (filterOnly ? "newest" : "relevance");
     var pool = filterOnly ? data.docs.map(function (_doc, ordinal) { return ordinal; })
       : Object.keys(scored).map(Number).sort(function (a, b) {
           return scored[b] - scored[a] || (data.docs[a].card_id < data.docs[b].card_id ? -1 : 1);
@@ -683,6 +716,7 @@
     results.forEach(function (row) {
       if (row.matched_count === unique.length) matchedAll += 1;
     });
+    var hit = filterOnly ? results.length : matchedAll;
     var missing = plan.unmatched.filter(function (term) { return term.length >= MIN_TERM; });
     // Each row is written in its own paper's notation, so the tables travel with the rows.
     var macros = {}, overrides = {};
@@ -696,8 +730,9 @@
              results: shown,
              // Every row that passed a filter-with-no-query is a hit, and how many there are is
              // what the reader asked for; see `Engine.search`.
-             hit_count: filterOnly ? results.length : matchedAll,
-             miss: Boolean(missing.length) || !matchedAll, decisive_terms: unique,
+             hit_count: hit,
+             author_resolved: authorResolved,
+             miss: Boolean(missing.length) || !hit, decisive_terms: unique,
              corrected: plan.corrections, unmatched: plan.unmatched, filters: wanted,
              sort: sort, papers: papers, paper_count: papers.length,
              index_docs: data.docs.length, facets: null,
