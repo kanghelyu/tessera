@@ -33,8 +33,12 @@
   };
 
   // How far an inline `$...$` may reach for its closing `$`. A card keeps the source's line
-  // breaks, so a wrapped formula is normal; a runaway match is not, and this bounds it.
-  const MAX_INLINE_MATH = 400;
+  // breaks, so a wrapped formula is normal. The length bound used to be 400 -- and it silently
+  // ate long abstract formulas (arXiv:2503.16353's Theorem B carried a 470-character `$…$`
+  // that rendered as raw source **without counting as a failure**, the worst kind of broken:
+  // the invisible one). The blank-line rule still guards against a stray `$` pairing across
+  // paragraphs; the length bound now matches the washer's own statement ceiling.
+  const MAX_INLINE_MATH = 4000;
 
   /** LaTeX that KaTeX does not have, translated into what it does.
    *
@@ -154,7 +158,7 @@
   //: How KaTeX marks a fragment it could not compile. Both spellings appear: a parse error
   //: gets the class, an unsupported command gets the colour and no class.
   const RENDER_ERROR = /katex-error|#cc0000/;
-  const state = { katex: null, failures: 0, compiled: 0, missing: [], failed: [], refs: 0,
+  const state = { katex: null, failures: 0, compiled: 0, inferred: 0, missing: [], failed: [], refs: 0,
                   macros: {}, own: {}, macroSource: null };
 
   function detect() {
@@ -376,6 +380,15 @@
       // (a comment line, an ar5iv extraction) -- one command that KaTeX does not have and
       // no macro table carries. Splitting it back apart is the source's own sentence.
       .replace(/\\(quad|qquad)(?=[a-zA-Z])/g, "\\\\$1 ")
+      // `\sbox0{…}` is a TeX box register holding pure mathematics (arXiv:1506.06417's
+      // `\fH` wraps every accent in one): the register number and the box are typesetting,
+      // the content is the formula.
+      .replace(/\\sbox\s*\d*\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g, "$1")
+      // `\begin{array}[t]{c}` is real LaTeX; KaTeX answers the `[t]` with "Unknown column
+      // alignment: '['" -- and whatever the environment, the vertical placement is not the
+      // content. The **empty** `[]` (arXiv:1309.0572 writes `\begin{array}[]{ll}`) fails the
+      // same way.
+      .replace(/(\\begin\{[a-z*]+\})\s*\[(?:[tcb])?\]/gi, "$1")
       .replace(/\\(begin|end)\{([^{}]+)\}/g, (whole, kind, name) => {
         const mapped = Object.prototype.hasOwnProperty.call(DISPLAY_ENVS, name)
           ? DISPLAY_ENVS[name] : null;
@@ -588,6 +601,96 @@
     return out;
   }
 
+  /** The last resort before raw source: **conventional inference** for commands the library
+   * never recovered a definition of.
+   *
+   * A paper's e-print sometimes simply does not carry the style file that defines its
+   * central notation -- arXiv:1701.08852's `\X`, `\Y`, `\D` come from a `.sty` it never
+   * shipped, and no recovery can read a definition that is not on disk. Mathematics has
+   * conventions for these: a repeated pair (`PP`, `ZZ`) is a blackboard letter, a single
+   * capital is calligraphic, a lower-case `g`/`gl`/`sl` is fraktur (the Lie-algebra
+   * family), `\rmT`-style is roman, anything else is an operator name. The inference renders
+   * each of them and is **counted separately** (`status().inferred`), so "the page compiles"
+   * never quietly means "the page was guessed": the window says how much was inferred, and
+   * the census can send the reader back to the paper's own spelling.
+   *
+   * Two refusals, both measured. Fragments carrying TeX **register/box machinery**
+   * (`\dimen`, `\ooalign`, `\copy` -- arXiv:1506.06417's `\fH`) are not inferred, because a
+   * wrong guess there renders gibberish where the red source was at least honest. Diagram
+   * environments are not inferred either: an arrow invented by a regex is a lie, and
+   * `\xymatrix` stays source.
+   */
+  const DIAGRAM_COMMANDS = new Set(["xymatrix", "tikz", "tikzcd", "tikzpicture", "xy",
+                                    "picture", "pgfpicture", "pgfplots", "CD", "diagram"]);
+  const BOX_MACHINERY = /\\(?:dimen\d*|ht\d*|wd\d*|dp\d*|advance|ooalign|box\d|copy\d|crcr|hidewidth|hbox|vbox|kern|noalign|cr\b|baselineskip)/;
+
+  function inferForm(cmd) {
+    if (/^([A-Za-z])\1$/.test(cmd)) return "\\mathbb{" + cmd[0] + "}";
+    if (/^rm[A-Z]/.test(cmd)) return "\\mathrm{" + cmd.slice(2) + "}";
+    if (cmd.length === 1 && /[A-Z]/.test(cmd)) return "\\mathcal{" + cmd + "}";
+    if (/^[a-z]+$/.test(cmd)) return "\\mathfrak{" + cmd + "}";
+    return "\\mathrm{" + cmd + "}";
+  }
+
+  /** A structure macro the paper's style defined and the payload lost: `\mat{a&b\\ c&d}`
+   * is a matrix in a single argument (arXiv:1004.3590, 68 fragments). The `&` or `\\` inside
+   * the braces *is* the row structure -- no symbol inference can carry it, so the argument
+   * is wrapped in the environment its name promises. Only a command whose name says
+   * "matrix-shaped" takes this branch. */
+  const MATRIX_SHAPED = /^(?:mat|mtx|matrix|bmat|pmatrix|smallmat)$/;
+
+  function inferUndefined(body) {
+    if (BOX_MACHINERY.test(body)) return body;
+    // A macro whose *definition* is box machinery (`\fH` = `\sbox0{#1}\dimen0=\ht0…`,
+    // arXiv:1506.06417's accent hack) appears in the body as its own name; inferring it
+    // from that name renders "𝔣𝔥X" where the paper built a decorated letter with register
+    // tricks -- gibberish where the red source was at least honest.
+    for (const key of Object.keys(state.macros)) {
+      if (BOX_MACHINERY.test(state.macros[key]) &&
+          new RegExp("\\\\" + key.slice(1) + "(?![A-Za-z])").test(body)) {
+        return body;
+      }
+    }
+    // the same honesty for diagrams: if a diagram command is in the body, its inner arrow
+    // language would be inferred one command at a time and render as gibberish words -- the
+    // whole fragment stays source
+    for (const diagram of DIAGRAM_COMMANDS) {
+      if (new RegExp("\\\\" + diagram + "(?![A-Za-z])").test(body)) return body;
+    }
+    const known = Object.create(null);
+    const resolved = {};
+    let changed = false;
+    const out = body.replace(/\\([A-Za-z]+)(?:\s*\{((?:[^{}]|\{[^{}]*\})*)\})?/g,
+      function (whole, cmd, argument) {
+        // a "keep" verdict and a symbol inference are per-command; the matrix wrapping is
+        // per-call (its argument carries the rows), so it is never cached
+        if (resolved[cmd] !== undefined) {
+          return resolved[cmd] === "keep" ? whole : resolved[cmd];
+        }
+        if (DIAGRAM_COMMANDS.has(cmd) || TEXT_SAFE.has(cmd) ||
+            katexKnows(cmd) || known["\\" + cmd] !== undefined) {
+          resolved[cmd] = "keep";
+          return whole;
+        }
+        known["\\" + cmd] = false;
+        changed = true;
+        if (argument !== undefined) {
+          // a matrix-shaped macro carries its rows in the argument itself
+          if (MATRIX_SHAPED.test(cmd) && /[&]|\\\\/.test(argument)) {
+            return "\\begin{matrix}" + argument + "\\end{matrix}";
+          }
+          // a parameterised macro whose name says nothing about its shape: the argument is
+          // part of the meaning, and guessing a font around it would render different
+          // mathematics -- this one stays honest red
+          resolved[cmd] = "keep";
+          return whole;
+        }
+        resolved[cmd] = inferForm(cmd);
+        return resolved[cmd];
+      });
+    return changed ? out : body;
+  }
+
   function renderFragment(fragment, refs) {
     state.compiled += 1;
     // A bare `$` inside a math fragment is always an artefact: TeX does not allow it either
@@ -654,6 +757,30 @@
         // it would blame the paper for a failure the macro table caused.
         if (!firstError) firstError = error;
         lastError = error;
+      }
+    }
+    // **The conventional-inference layer, before the failure is recorded.** A body whose
+    // faithful spellings all failed on commands nothing defines gets its unknown commands
+    // rendered by convention (\X calligraphic, \PP blackboard, \g fraktur) and tried once
+    // more. Success is counted separately (`state.inferred`), never as a faithful compile:
+    // the reader sees mathematics where they saw red, and the window still says how much of
+    // it was inferred.
+    const inferredBody = inferUndefined(rewritten);
+    if (inferredBody !== rewritten) {
+      const inferAttempts = [];
+      if (Object.keys(state.macros).length) {
+        inferAttempts.push(Object.assign({}, base, { macros: state.macros, throwOnError: true }));
+      }
+      inferAttempts.push(Object.assign({}, base, { throwOnError: true }));
+      for (const options of inferAttempts) {
+        try {
+          const html = state.katex.renderToString(inferredBody, options);
+          if (RENDER_ERROR.test(html)) {
+            throw new Error("KaTeX marked the inferred fragment as an error");
+          }
+          state.inferred += 1;
+          return html;
+        } catch (error) { lastError = error; }
       }
     }
     state.failures += 1;
@@ -737,6 +864,7 @@
   function toHtml(text, options) {
     state.failures = 0;
     state.compiled = 0;
+    state.inferred = 0;
     state.refs = 0;
     state.missing = [];
     state.failed = [];
@@ -809,6 +937,7 @@
 
   function status() {
     return { katex: !!state.katex, compiled: state.compiled, failures: state.failures,
+             inferred: state.inferred,
              refs: state.refs, macros: Object.keys(state.own).length,
              compat: Object.keys(COMPAT).length,
              missing: state.missing.slice(0, 4), failed: state.failed.slice(0, 200) };

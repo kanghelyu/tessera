@@ -78,6 +78,7 @@
       "tex.none": "KaTeX not loaded: formulas are shown as plain text " +
                   "(ui/vendor/katex should hold katex.min.js and katex.min.css).",
       "tex.compiled": "{n} formulas compiled (KaTeX)",
+      "tex.inferred": "{n} rendered by convention",
       "tex.macros": "{n} of the paper's own macros",
       "tex.refs": "{n} cross-references resolved",
       "tex.failed": "{n} could not be compiled (shown as-is, not dropped): {list}",
@@ -161,6 +162,7 @@
       "meta.ver": "{version} · {papers} 篇 / {cards} 卡",
       "tex.none": "KaTeX 未加载：公式以纯文本近似显示（ui/vendor/katex 里应有 katex.min.js 与 katex.min.css）。",
       "tex.compiled": "{n} 个公式已编译（KaTeX）",
+      "tex.inferred": "{n} 个按惯例推断渲染",
       "tex.macros": "本文自定义宏 {n} 个",
       "tex.refs": "{n} 处交叉引用已解析",
       "tex.failed": "{n} 个无法编译（原样显示，未丢弃）：{list}",
@@ -672,6 +674,7 @@
     }
     const parts = [];
     if (status.compiled) parts.push(t("tex.compiled", { n: status.compiled }));
+    if (status.inferred) parts.push(t("tex.inferred", { n: status.inferred }));
     if (status.macros) parts.push(t("tex.macros", { n: status.macros }));
     if (status.refs) parts.push(t("tex.refs", { n: status.refs }));
     if (status.failures) {
