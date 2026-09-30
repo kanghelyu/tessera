@@ -535,7 +535,13 @@
 
   function load(name) {
     if (!cache[name]) {
-      cache[name] = fetch("data/" + name, { cache: "force-cache" }).then(function (response) {
+      // `no-cache`, not `force-cache`: the data files sit behind a 600 s CDN TTL, and
+      // `force-cache` answers from the browser's own copy **even when it is stale** -- after a
+      // deploy a reader could sit on the old library until a hard reload, which is exactly the
+      // "the fix did not land" report that reads as a broken deploy. `no-cache` revalidates
+      // once per file per visit (a 304 costs a round trip, not a re-download; GitHub Pages
+      // answers it), so a new build is visible on the first visit after the HTML moves.
+      cache[name] = fetch("data/" + name, { cache: "no-cache" }).then(function (response) {
         if (!response.ok) throw new Error("missing " + name);
         return response.json();
       });
