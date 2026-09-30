@@ -295,6 +295,34 @@
     while (index < source.length) {
       const char = source[index];
 
+      // `\beql{label} … \eeq` / `\beq(label) … \ueq`: a paper's own equation delimiters
+      // (arXiv:2604.25462 defines `\def\beql#1{\begin{equation}\label{#1}}`). The washer
+      // normalises them, so this branch is the renderer-side repair for a card that was
+      // washed before the normalisation existed. Measured after the re-wash: zero cards of
+      // the 9657 in the library carry the shape, and `measure_render` is byte-identical
+      // with and without this branch (63889 fragments, 975 failing) -- it stays because the
+      // window can be pointed at an older library, not because it fires.
+      // The `\b` keeps `\bequivalent` from reading as `\beq`; measured, the corpus has no
+      // such name, but the washer guards the same way and the two must agree.
+      if (char === "\\" && /^\\beqa?l?\b/.test(source.slice(index))) {
+        const open = /^(\\beqa?l?)\b\s*(?:\{([^{}]*)\}|\(([^()]*)\))?/.exec(
+          source.slice(index));
+        if (open && open[0].length > 2) {
+          const label = open[2] || open[3] || "";
+          const close = /\n?\\(ueqa?|eela?|eeqa?)\b/.exec(
+            source.slice(index + open[0].length));
+          if (close) {
+            const inner = source.slice(index + open[0].length,
+                                       index + open[0].length + close.index);
+            flush();
+            out.push({ math: true, display: true,
+                       body: (label ? "\\tag{" + label + "} " : "") + inner });
+            index += open[0].length + close.index + close[0].length;
+            continue;
+          }
+        }
+      }
+
       if (char === "\\" && source.startsWith("\\begin{", index)) {
         const nameEnd = source.indexOf("}", index + 7);
         if (nameEnd > 0) {
