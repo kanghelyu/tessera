@@ -1227,11 +1227,12 @@
     const pointers = new Map();
     let drag = null;
     let pinch = null;
+    // Whether the gesture in progress is a pan or a pinch rather than a click. A plain flag,
+    // reset on the next `pointerdown`: the previous version set a `dataset` entry and cleared
+    // it from a `setTimeout(…, 0)`, which is a race against the `click` event that follows --
+    // and a drag that ends on a node would then be read as a click on it.
+    let dragged = false;
 
-    const markDragged = () => {
-      svg.dataset.dragged = "1";
-      setTimeout(() => { delete svg.dataset.dragged; }, 0);
-    };
     /** Zoom to `next` while keeping the viewport point (`mx`, `my`) over the same content. */
     const zoomAt = (next, mx, my) => {
       const factor = next / GRAPH.scale;
@@ -1242,10 +1243,16 @@
     };
 
     svg.addEventListener("pointerdown", (event) => {
+      dragged = false;
       // Capture keeps the gesture alive when the pointer leaves the box. It throws when the
       // pointer is already gone -- a race on real devices, always on a synthetic event -- and
       // an exception here would kill the handler before the pointer is even registered, so
       // the whole gesture silently dies. Losing capture only costs tracking past the edge.
+      //
+      // It also **retargets the `click` that follows to this `<svg>`**, which is why the click
+      // handler hit-tests the coordinates instead of reading `event.target`. Measured with a
+      // real mouse event on a node's own centre: the target was the `svg`, so the node could
+      // not be found and no click on the graph ever did anything.
       try {
         svg.setPointerCapture(event.pointerId);
       } catch (_error) { /* the pointer vanished; the gesture still works inside the box */ }
@@ -1270,7 +1277,7 @@
         const cx = (a.x + b.x) / 2 - rect.left, cy = (a.y + b.y) / 2 - rect.top;
         zoomAt(next, cx, cy);
         drag = null;
-        markDragged();
+        dragged = true;
         return;
       }
       if (!drag) return;
@@ -1286,7 +1293,7 @@
       if (!pointers.size) {
         const moved = drag && drag.moved;
         drag = null;
-        if (moved) markDragged();
+        if (moved) dragged = true;
       }
     };
     svg.addEventListener("pointerup", release);
@@ -1300,9 +1307,23 @@
       zoomAt(next, event.clientX - rect.left, event.clientY - rect.top);
     }, { passive: false });
 
-    view.addEventListener("click", (event) => {
-      const node = event.target.closest ? event.target.closest(".gn") : null;
-      if (svg.dataset.dragged) return;
+    // The listener is on the `<svg>`, not on the `view` group inside it, and that is the whole
+    // fix: `pointerdown` captures the pointer on the `<svg>`, capture retargets the following
+    // click to the capturing element, and an event dispatched on the `svg` propagates along
+    // **its** ancestor chain -- a listener on a descendant never runs at all. Measured with a
+    // real mouse event aimed at a node's own centre: `event.target` was the `svg`, `view`'s
+    // listener was never called, and no click on the graph did anything.
+    //
+    // `event.target` is therefore useless here too (it is the `svg` however precisely the
+    // reader aimed), so the node is found by hit-testing the click's own coordinates -- hit
+    // testing is not affected by capture. A click that is *not* retargeted still arrives here
+    // and still resolves to the same node.
+    svg.addEventListener("click", (event) => {
+      if (dragged) return;
+      const hit = typeof event.clientX === "number" && typeof event.clientY === "number"
+        ? document.elementFromPoint(event.clientX, event.clientY) : null;
+      const source = hit || event.target;
+      const node = source && source.closest ? source.closest(".gn") : null;
       if (!node) {
         // a click on the background puts the box away and the highlight back on the focus
         $("node-detail").hidden = true;
